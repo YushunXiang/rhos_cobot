@@ -245,72 +245,73 @@ def replay_eef_data(args):
     qposs, qvels, efforts, actions, base_actions, image_dicts, actions_eef = load_hdf5(
         os.path.join(dataset_dir, task_name), dataset_name)
 
-    if args.only_pub_master:
-        last_action = [-0.0057, -0.031, -0.0122, -0.032, 0.0099, 0.0179,
-                       0.2279, 0.0616, 0.0021, 0.0475, -0.1013, 0.1097, 0.0872, 0.2279]
-        rate = rospy.Rate(100)
-        for action in actions:
-            if (rospy.is_shutdown()):
-                break
+    # if args.only_pub_master:
+    #     last_action = [-0.0057, -0.031, -0.0122, -0.032, 0.0099, 0.0179,
+    #                    0.2279, 0.0616, 0.0021, 0.0475, -0.1013, 0.1097, 0.0872, 0.2279]
+    #     rate = rospy.Rate(100)
+    #     for action in actions:
+    #         if (rospy.is_shutdown()):
+    #             break
 
-            new_actions = np.linspace(last_action, action, 20)  # 插值
-            last_action = action
-            for act in new_actions:
-                print(np.round(act[:7], 4))
-                cur_timestamp = rospy.Time.now()  # 设置时间戳
-                joint_state_msg.header.stamp = cur_timestamp
+    #         new_actions = np.linspace(last_action, action, 20)  # 插值
+    #         last_action = action
+    #         for act in new_actions:
+    #             print(np.round(act[:7], 4))
+    #             cur_timestamp = rospy.Time.now()  # 设置时间戳
+    #             joint_state_msg.header.stamp = cur_timestamp
 
-                joint_state_msg.position = act[:7]
-                master_arm_left_publisher.publish(joint_state_msg)
+    #             joint_state_msg.position = act[:7]
+    #             master_arm_left_publisher.publish(joint_state_msg)
 
-                joint_state_msg.position = act[7:]
-                master_arm_right_publisher.publish(joint_state_msg)
+    #             joint_state_msg.position = act[7:]
+    #             master_arm_right_publisher.publish(joint_state_msg)
 
-                if (rospy.is_shutdown()):
-                    break
-                rate.sleep()
+    #             if (rospy.is_shutdown()):
+    #                 break
+    #             rate.sleep()
 
-    else:
-        i = 0
+    # else:
+    i = 0
 
-        while (not rospy.is_shutdown() and i < len(actions)):
-            # , " right: ", np.round(qposs[i][7:], 4))
-            print("left: ", np.round(qposs[i][:7], 4))
+    
+    while (not rospy.is_shutdown() and i < len(actions)):
+        # , " right: ", np.round(qposs[i][7:], 4))
+        print("left: ", np.round(qposs[i][:7], 4))
 
-            cam_names = [k for k in image_dicts.keys()]
-            image0 = image_dicts[cam_names[0]][i]
-            image0 = image0[:, :, [2, 1, 0]]  # swap B and R channel
+        cam_names = [k for k in image_dicts.keys()]
+        image0 = image_dicts[cam_names[0]][i]
+        image0 = image0[:, :, [2, 1, 0]]  # swap B and R channel
 
-            image1 = image_dicts[cam_names[1]][i]
-            image1 = image1[:, :, [2, 1, 0]]  # swap B and R channel
+        image1 = image_dicts[cam_names[1]][i]
+        image1 = image1[:, :, [2, 1, 0]]  # swap B and R channel
 
-            image2 = image_dicts[cam_names[2]][i]
-            image2 = image2[:, :, [2, 1, 0]]  # swap B and R channel
+        image2 = image_dicts[cam_names[2]][i]
+        image2 = image2[:, :, [2, 1, 0]]  # swap B and R channel
 
-            cur_timestamp = rospy.Time.now()  # 设置时间戳
+        cur_timestamp = rospy.Time.now()  # 设置时间戳
 
-            eef_msg.x, eef_msg.y, eef_msg.z = actions_eef[i][8:11]
-            eef_msg.roll, eef_msg.pitch, eef_msg.yaw = euler_from_quaternion(
-                actions_eef[i][11:15])
-            eef_msg.gripper = actions_eef[i][15:16]
-            puppet_eef_right_publisher.publish(eef_msg)
+        eef_msg.x, eef_msg.y, eef_msg.z = actions_eef[i][8:11]
+        eef_msg.roll, eef_msg.pitch, eef_msg.yaw = euler_from_quaternion(
+            actions_eef[i][11:15])
+        eef_msg.gripper = actions_eef[i][15:16]
+        puppet_eef_right_publisher.publish(eef_msg)
 
-            eef_msg.x, eef_msg.y, eef_msg.z = actions_eef[i][:3]
-            eef_msg.roll, eef_msg.pitch, eef_msg.yaw = euler_from_quaternion(
-                actions_eef[i][3:7])
-            eef_msg.gripper = actions_eef[i][7:8]
-            puppet_eef_left_publisher.publish(eef_msg)
+        eef_msg.x, eef_msg.y, eef_msg.z = actions_eef[i][:3]
+        eef_msg.roll, eef_msg.pitch, eef_msg.yaw = euler_from_quaternion(
+            actions_eef[i][3:7])
+        eef_msg.gripper = actions_eef[i][7:8]
+        puppet_eef_left_publisher.publish(eef_msg)
 
-            img_front_publisher.publish(bridge.cv2_to_imgmsg(image0, "bgr8"))
-            img_left_publisher.publish(bridge.cv2_to_imgmsg(image1, "bgr8"))
-            img_right_publisher.publish(bridge.cv2_to_imgmsg(image2, "bgr8"))
+        img_front_publisher.publish(bridge.cv2_to_imgmsg(image0, "bgr8"))
+        img_left_publisher.publish(bridge.cv2_to_imgmsg(image1, "bgr8"))
+        img_right_publisher.publish(bridge.cv2_to_imgmsg(image2, "bgr8"))
 
-            twist_msg.linear.x = base_actions[i][0]
-            twist_msg.angular.z = base_actions[i][1]
-            robot_base_publisher.publish(twist_msg)
+        twist_msg.linear.x = base_actions[i][0]
+        twist_msg.angular.z = base_actions[i][1]
+        robot_base_publisher.publish(twist_msg)
 
-            i += 1
-            rate.sleep()
+        i += 1
+        rate.sleep()
 
 
 def replay_joint_data(args):
@@ -369,6 +370,7 @@ def replay_joint_data(args):
         cv2.waitKey(1)
 
         action = actions[i]
+        # action = np.concatenate([action[7:],action[:7]]) # for old data
         new_actions = np.linspace(last_action, action, 20)  # 插值
         last_action = action
         for act in new_actions:

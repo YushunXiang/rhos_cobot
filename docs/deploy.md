@@ -19,4 +19,5 @@ roslaunch piper start_ms_piper.launch mode:=1 auto_enable:=true
 sudo ip addr add 10.42.0.3/24 dev enp3s0
 sudo ip link set enp3s0 up
 source examples/piper_real/.venv/bin/activate
+source ~/cobot_magic/openpi/examples/piper_real/.venv/bin/activate
 python -m examples.piper_real.main

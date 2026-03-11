@@ -71,6 +71,7 @@ def get_arguments():
 
 def main():
     args = get_arguments()
+    # args.use_depth_image = False
     print(f"use_depth_img: {args.use_depth_image}")
     ros_operator = RosOperator(args)
     

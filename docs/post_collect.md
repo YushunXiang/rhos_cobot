@@ -10,7 +10,7 @@
 使用脚本检查关节数据是否存在数值溢出或者数据丢失。
 
 ```bash
-python -m scripts.post_collect.check_joint_data --dataset_dir ./data/ --data_key qpos [--task_name task0063_user0012_scene0004_ep0]
+python -m scripts.post_collect.check_joints --dataset_dir ./data/ --data_key qpos [--task_name task0063_user0012_scene0004_ep0]
 ```
 task_name 可选，指定检查某个任务，否则检查所有任务。
 
@@ -21,6 +21,15 @@ task_name 可选，指定检查某个任务，否则检查所有任务。
 4. 压缩标志位 compress 是否正确
 
 检查日志将输出到控制台和指定 log 文件中，请仔细查看是否存在警告信息。
+
+> (待验证) 使用脚本修复关节数据数值溢出
+> ```bash
+> python -m scripts.post_collect.fix_joints --dataset_dir ./data/ --data_key qpos --task_name tube_transfer
+> ```
+> 该脚本会对指定任务的所有 episode 进行检查和修复，修复后的数据不会覆盖原始数据，而是储存在子目录fixed中
+> 注意：该脚本只能靠插值修复离群点和突变点 无法解决其他问题
+> 检查日志将输出到控制台和指定 log 文件中，请仔细查看是否存在警告信息。
+
 ## 2. 可视化数据
 可视化采集到的视频、关节角度、末端执行器等数据。  
 For example:

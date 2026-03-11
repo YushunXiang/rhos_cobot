@@ -9,10 +9,10 @@ sh scripts/init.sh
 插入两个主臂（即遥操作臂）的航插线，重启机械臂插排；运行以下命令进入 collect 模式。
 ```bash
 conda activate aloha
-# 如果使用的是 zsh，可以使用 init_collect 快速切换 collect 模式。
-init_collect
+# 如果使用的是 zsh，可以使用 init_record 快速切换 record 模式。
+init_record
 # 或者手动运行以下脚本
-roslaunch piper start_ms_piper.launch mode:=0 auto_enable:=false 
+roslaunch piper start_ms_piper.launch mode:=0 auto_enabshle:=false 
 ```
 
 ## 1. 采集数据
