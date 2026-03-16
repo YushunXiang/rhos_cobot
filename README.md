@@ -38,11 +38,15 @@ python -m scripts.collect.collect_data_eef_qpos --dataset_dir=./data --task_name
 # 检查关节数据
 python -m scripts.post_collect.check_joints --dataset_dir ./data/ --data_key qpos
 
+# 修复离群点/突变（check 发现问题后）
+python -m scripts.post_collect.fix_joints --dataset_dir ./data/ --task_name <task_name> --data_key qpos
+# 修复结果在 data/<task_name>/fixed/，再次 check 验证
+
 # 可视化数据
 python -m scripts.post_collect.visualize_episodes_eef --dataset_dir ./data/ --task_name <task_name> --episode_idx 5
 
 # 重播数据（可选，需先进入 deploy 模式）
-python -m scripts.post_collect.replay_data_eef --dataset_dir ./data/ --task_name <task_name> --episode_idx 5
+python -m scripts.post_collect.replay_data --dataset_dir ./data/ --task_name <task_name> --episode_idx 5
 
 # 计算时长
 python -m scripts.post_collect.cal_time --dataset_dir ./data/ --task_name <task_name>
@@ -51,7 +55,7 @@ python -m scripts.post_collect.cal_time --dataset_dir ./data/ --task_name <task_
 python -m scripts.post_collect.data_summary_simple
 ```
 
-详见 [docs/post_collect.md](docs/post_collect.md)
+详见 [docs/post_collect.md](docs/post_collect.md) 和 [docs/replay.md](docs/replay.md)
 
 ### 3. 部署推理 (deploy)
 
@@ -75,4 +79,3 @@ python -m examples.piper_real.main
 - [x] 离群点处理脚本 merge 进来 (待验证)
 - [ ] openpi deploy merge 进来
 - [ ] deploy readme 详细补充
-

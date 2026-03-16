@@ -22,20 +22,40 @@ task_name 可选，指定检查某个任务，否则检查所有任务。
 
 检查日志将输出到控制台和指定 log 文件中，请仔细查看是否存在警告信息。
 
-> (待验证) 使用脚本修复关节数据数值溢出
-> ```bash
-> python -m scripts.post_collect.fix_joints --dataset_dir ./data/ --data_key qpos --task_name tube_transfer
-> ```
-> 该脚本会对指定任务的所有 episode 进行检查和修复，修复后的数据不会覆盖原始数据，而是储存在子目录fixed中
-> 注意：该脚本只能靠插值修复离群点和突变点 无法解决其他问题
-> 检查日志将输出到控制台和指定 log 文件中，请仔细查看是否存在警告信息。
+如果 check_joints 发现了离群点或突变，可以使用 fix_joints 脚本进行修复，完整流程如下：
+
+**步骤一：确认问题（action 同理）**
+```bash
+python -m scripts.post_collect.check_joints --dataset_dir ./data/ --data_key qpos --task_name <task_name>
+```
+查看日志 `data/check_log/check_qpos.log`，确认存在 WARNING。
+
+**步骤二：运行修复**
+```bash
+python -m scripts.post_collect.fix_joints --dataset_dir ./data/ --data_key qpos --task_name <task_name>
+```
+脚本对每个关节逐维度做线性插值（前后帧均值替换异常值），先处理超出 `[-π, π]` 的点，再处理突变点。修复后的数据**不覆盖原始文件**，存入 `data/<task_name>/fixed/` 子目录。修复日志写入 `data/fix_log/fix_qpos.log`。
+
+**步骤三：验证修复结果**
+```bash
+python -m scripts.post_collect.check_joints --dataset_dir ./data/<task_name>/fixed/ --data_key qpos
+```
+若日志中不再有 WARNING，说明修复有效。
+
+**步骤四（可选）：可视化对比**
+```bash
+python -m scripts.post_collect.visualize_episodes_eef --dataset_dir ./data/<task_name>/fixed/ --task_name fixed --episode_idx <idx>
+```
+对比修复前后的关节曲线，确认异常点已被平滑。
+
+> 注意：fix_joints 只能通过插值修复离群点和突变点，无法解决数据全为零、视频损坏等其他问题。对于严重损坏的 episode，建议直接丢弃。
 
 ## 2. 可视化数据
 可视化采集到的视频、关节角度、末端执行器等数据。  
 For example:
 
 ```bash
-python -m scripts.post_collect.visualize_episodes_eef --dataset_dir ./data/ --task_name task0063_user0012_scene0004_ep0 --episode_idx 5
+python -m scripts.post_collect.visualize_episodes --dataset_dir ./data/ --task_name task0063_user0012_scene0004_ep0 --episode_idx 5
 ```
 该脚本会在指定的目录下生成可视化结果，包括视频、关节角度图像等。请仔细观察是否存在视频数据损坏、关节角度记录异常（如左右臂数据明显颠倒）、末端执行器数据异常等问题。
 
@@ -46,11 +66,17 @@ python -m scripts.post_collect.visualize_episodes_eef --dataset_dir ./data/ --ta
 机器处于 deploy模式，即可以接收关节角度和末端执行器位置的指令，详见 [deploy模式](./deploy.md)。
 
 ```bash
+# 推荐：按 cobot_magic 的 joint replay 习惯重播图像、主臂 action 和从臂 qpos
+python -m scripts.post_collect.replay_data --dataset_dir ./data/ --task_name task0063_user0012_scene0004_ep0 --episode_idx 5
+
+# 如需末端位姿指令重播，继续使用 eef 版本
 python -m scripts.post_collect.replay_data_eef --dataset_dir ./data/ --task_name task0063_user0012_scene0004_ep0 --episode_idx 5
 
+# 保留旧的 joint 入口
 python -m scripts.post_collect.replay_data_joint --dataset_dir ./data/ --task_name task0063_user0012_scene0004_ep0 --episode_idx 5
 ```
-该脚本会重播指定的episode数据，并在控制台输出关节角度和末端执行器位置等信息。
+推荐优先阅读 [replay.md](./replay.md)，其中包含断电重启、拔主臂航插头、启动顺序以及 `--only_pub_master` 的使用说明。
+这些脚本会重播指定的 episode 数据，并在控制台输出关节角度、末端位姿或其他相关状态信息。
 
 ## 4. 数据处理
 如果数据可视化和重播都通过了，可以使用以下脚本进行数据处理，对数据命名以及元数据进行格式统一。
