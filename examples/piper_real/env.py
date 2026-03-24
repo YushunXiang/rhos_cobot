@@ -30,6 +30,11 @@ class PiperRealEnvironment(_environment.Environment):
         if self.save_obs:
             self.saver = _obs_saver()
 
+
+    @property
+    def ros_operator(self):
+        return self._env.ros_operator
+
     @override
     def reset(self) -> None:
         self._ts = self._env.reset()

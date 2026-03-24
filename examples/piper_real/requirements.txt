@@ -7,12 +7,21 @@ absl-py==2.2.2
     #   dm-tree
     #   labmaze
     #   mujoco
+annotated-types==0.7.0
+    # via pydantic
+anyio==4.12.1
+    # via
+    #   httpx
+    #   openai
 attrs==25.3.0
     # via dm-tree
 catkin-pkg==1.0.0
     # via rospkg
 certifi==2025.4.26
-    # via requests
+    # via
+    #   httpcore
+    #   httpx
+    #   requests
 charset-normalizer==3.4.2
     # via requests
 contourpy==1.3.2
@@ -20,7 +29,9 @@ contourpy==1.3.2
 cycler==0.12.1
     # via matplotlib
 distro==1.9.0
-    # via rospkg
+    # via
+    #   openai
+    #   rospkg
 dm-control==1.0.30
     # via -r examples/piper_real/requirements.in
 dm-env==1.6
@@ -49,14 +60,25 @@ glfw==2.9.0
     # via
     #   dm-control
     #   mujoco
+h11==0.16.0
+    # via httpcore
 h5py==3.13.0
     # via -r examples/piper_real/requirements.in
+httpcore==1.0.9
+    # via httpx
+httpx==0.28.1
+    # via openai
 idna==3.10
-    # via requests
+    # via
+    #   anyio
+    #   httpx
+    #   requests
 importlib-resources==6.5.2
     # via etils
 jinja2==3.1.6
     # via torch
+jiter==0.13.0
+    # via openai
 kiwisolver==1.4.8
     # via matplotlib
 labmaze==1.0.6
@@ -134,6 +156,8 @@ nvidia-nvjitlink-cu12==12.6.85
     #   torch
 nvidia-nvtx-cu12==12.6.77
     # via torch
+openai==2.29.0
+    # via -r examples/piper_real/requirements.in
 opencv-python==4.11.0.86
     # via -r examples/piper_real/requirements.in
 packaging==25.0
@@ -152,6 +176,10 @@ protobuf==6.30.2
     # via dm-control
 ptyprocess==0.7.0
     # via pexpect
+pydantic==2.12.5
+    # via openai
+pydantic-core==2.41.5
+    # via pydantic
 pygments==2.19.1
     # via rich
 pyopengl==3.1.9
@@ -196,22 +224,33 @@ shtab==1.7.2
     # via tyro
 six==1.17.0
     # via python-dateutil
+sniffio==1.3.1
+    # via openai
 sympy==1.14.0
     # via torch
 torch==2.7.0
     # via -r examples/piper_real/requirements.in
 tqdm==4.67.1
-    # via dm-control
+    # via
+    #   dm-control
+    #   openai
 triton==3.3.0
     # via torch
 typeguard==4.4.2
     # via tyro
-typing-extensions==4.13.2
+typing-extensions==4.15.0
     # via
+    #   anyio
     #   etils
+    #   openai
+    #   pydantic
+    #   pydantic-core
     #   torch
     #   typeguard
+    #   typing-inspection
     #   tyro
+typing-inspection==0.4.2
+    # via pydantic
 tyro==0.9.20
     # via -r examples/piper_real/requirements.in
 tzdata==2025.2
