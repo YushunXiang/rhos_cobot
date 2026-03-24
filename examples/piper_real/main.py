@@ -20,12 +20,14 @@ class Args:
     host: str = "10.42.0.2" #H100
     port: int = 9000
 
-    action_horizon: int = 32
+    action_horizon: int = 16
 
     num_episodes: int = 1
     max_episode_steps: int = 1000
     
     save_log: bool = False
+
+    prompt: str = ""
 
 
 def main(args: Args) -> None:
@@ -43,7 +45,7 @@ def main(args: Args) -> None:
         output_joint_state_logger = _logger.OutputJointStateLogger()
     
     runtime = _runtime.Runtime(
-        environment=_env.PiperRealEnvironment(reset_position=metadata.get("reset_pose")),
+        environment=_env.PiperRealEnvironment(reset_position=metadata.get("reset_pose"), prompt=args.prompt),
         agent=_policy_agent.PolicyAgent(
             policy=action_chunk_broker.ActionChunkBroker(
                 policy=ws_client_policy,
