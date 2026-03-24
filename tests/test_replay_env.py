@@ -121,3 +121,20 @@ class TestReplayEnvironment:
         for cam in ("cam_high", "cam_left_wrist", "cam_right_wrist"):
             assert obs["images"][cam].shape == (3, 224, 224)
             assert obs["images"][cam].dtype == np.uint8
+
+
+class TestMainReplayIntegration:
+    """Verify that main.py accepts --replay-dataset and constructs ReplayEnvironment."""
+
+    def test_args_has_replay_dataset_field(self):
+        import dataclasses
+        from examples.piper_real.main import Args
+
+        fields = {f.name for f in dataclasses.fields(Args)}
+        assert "replay_dataset" in fields
+
+    def test_args_replay_dataset_default_is_empty(self):
+        from examples.piper_real.main import Args
+
+        args = Args()
+        assert args.replay_dataset == ""

@@ -5,8 +5,11 @@
 import dataclasses
 import logging
 
+import numpy as np
+
 import tyro
 
+from examples.piper_real import base_safety as _base_safety
 from openpi_client import action_chunk_broker
 from openpi_client import websocket_client_policy as _websocket_client_policy
 from openpi_client.runtime import runtime as _runtime
@@ -26,11 +29,66 @@ class Args:
     max_episode_steps: int = 1000
     save_log: bool = False
     prompt: str = ""
+    replay_dataset: str = ""  # Path to HDF5 episode file for offline replay
+    use_llm_planner: bool = False
+    use_robot_base: bool = False
     planner: PlannerConfig = dataclasses.field(default_factory=PlannerConfig)
 
 
 def main(args: Args) -> None:
-    args.planner.validate()
+    prompt = args.prompt.strip()
+
+    # ── Replay mode: skip ROS, safety, navigation ──────────────────────
+    if args.replay_dataset:
+        from examples.piper_real import replay_env as _replay_env
+
+        logging.info("Replay mode: loading %s", args.replay_dataset)
+        environment = _replay_env.ReplayEnvironment(
+            dataset_path=args.replay_dataset,
+            prompt=prompt,
+        )
+
+        ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
+            host=args.host,
+            port=args.port,
+        )
+        metadata = ws_client_policy.get_server_metadata()
+        logging.info("Server metadata: %s", metadata)
+
+        runtime = _runtime.Runtime(
+            environment=environment,
+            agent=_policy_agent.PolicyAgent(
+                policy=action_chunk_broker.ActionChunkBroker(
+                    policy=ws_client_policy,
+                    action_horizon=args.action_horizon,
+                )
+            ),
+            subscribers=[],
+            max_hz=50,
+            num_episodes=args.num_episodes,
+            max_episode_steps=args.max_episode_steps,
+        )
+        runtime.run()
+
+        # ── Post-replay summary ────────────────────────────────────────
+        if environment.predicted_actions:
+            predicted = np.stack(environment.predicted_actions)
+            gt = environment.ground_truth_actions[: len(predicted)]
+            mae = np.mean(np.abs(predicted[:, :14] - gt[:, :14]))
+            logging.info(
+                "Replay finished: %d steps, MAE vs ground-truth: %.6f",
+                len(predicted),
+                mae,
+            )
+        return
+
+    navigation_requested = args.use_llm_planner and bool(prompt)
+    base_motion_requested = args.use_robot_base or navigation_requested
+
+    if base_motion_requested:
+        args.planner.validate_motion_limits()
+    if navigation_requested:
+        args.planner.validate_service_config()
 
     ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
         host=args.host,
@@ -46,16 +104,25 @@ def main(args: Args) -> None:
     environment = _env.PiperRealEnvironment(
         reset_position=metadata.get("reset_pose"),
         prompt=args.prompt,
+        use_robot_base=args.use_robot_base,
+        max_base_linear_vel=args.planner.max_linear_vel,
+        max_base_angular_vel=args.planner.max_angular_vel,
     )
 
-    prompt = args.prompt.strip()
-    if args.planner.enable_navigation:
+    if base_motion_requested and not _base_safety.confirm_base_motion_safety(
+        prompt,
+        use_llm_planner=navigation_requested,
+        use_robot_base=args.use_robot_base,
+    ):
+        _base_safety.stop_base(environment.ros_operator)
+        logging.error("Base motion aborted before execution; manipulation will not start.")
+        return
+
+    if args.use_llm_planner:
         if prompt:
             planner = _llm_planner.LLMNavigationPlanner(environment.ros_operator, args.planner)
-            if not planner.confirm_navigation_safety(prompt):
-                logging.error("Navigation aborted before execution; manipulation will not start.")
-                return
             if not planner.run(task_prompt=prompt):
+                _base_safety.stop_base(environment.ros_operator)
                 logging.error("Navigation failed; manipulation will not start.")
                 return
             logging.info("Navigation succeeded; starting manipulation runtime.")
@@ -64,8 +131,8 @@ def main(args: Args) -> None:
             logging.info('Navigation status: {"status": "navigation_skipped", "reason": "empty prompt"}')
             logging.info("Navigation skipped; starting manipulation runtime.")
     else:
-        logging.info("Navigation skipped because planner.enable_navigation is false.")
-        logging.info('Navigation status: {"status": "navigation_skipped", "reason": "planner.enable_navigation is false"}')
+        logging.info("Navigation skipped because use_llm_planner is false.")
+        logging.info('Navigation status: {"status": "navigation_skipped", "reason": "use_llm_planner is false"}')
         logging.info("Navigation skipped; starting manipulation runtime.")
 
     runtime = _runtime.Runtime(
@@ -81,7 +148,11 @@ def main(args: Args) -> None:
         num_episodes=args.num_episodes,
         max_episode_steps=args.max_episode_steps,
     )
-    runtime.run()
+    try:
+        runtime.run()
+    finally:
+        if args.use_llm_planner or args.use_robot_base:
+            _base_safety.stop_base(environment.ros_operator)
 
 
 if __name__ == "__main__":
