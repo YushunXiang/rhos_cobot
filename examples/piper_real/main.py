@@ -32,54 +32,54 @@ class Args:
     replay_dataset: str = ""  # Path to HDF5 episode file for offline replay
     use_llm_planner: bool = False
     use_robot_base: bool = False
+    navigation_only: bool = False  # Run navigation only, skip manipulation
     planner: PlannerConfig = dataclasses.field(default_factory=PlannerConfig)
 
 
 def main(args: Args) -> None:
     prompt = args.prompt.strip()
 
-    # ── Replay mode: skip ROS, safety, navigation ──────────────────────
+    if args.navigation_only:
+        args.use_llm_planner = True
+
+    if args.navigation_only and args.replay_dataset:
+        logging.error("--navigation-only and --replay-dataset are mutually exclusive.")
+        return
+
+    # ── Replay mode: pure offline HDF5 data inspection ────────────────
     if args.replay_dataset:
-        from examples.piper_real import replay_env as _replay_env
+        import h5py
 
-        logging.info("Replay mode: loading %s", args.replay_dataset)
-        environment = _replay_env.ReplayEnvironment(
-            dataset_path=args.replay_dataset,
-            prompt=prompt,
-        )
-
-        ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
-            host=args.host,
-            port=args.port,
-        )
-        metadata = ws_client_policy.get_server_metadata()
-        logging.info("Server metadata: %s", metadata)
-
-        runtime = _runtime.Runtime(
-            environment=environment,
-            agent=_policy_agent.PolicyAgent(
-                policy=action_chunk_broker.ActionChunkBroker(
-                    policy=ws_client_policy,
-                    action_horizon=args.action_horizon,
-                )
-            ),
-            subscribers=[],
-            max_hz=50,
-            num_episodes=args.num_episodes,
-            max_episode_steps=args.max_episode_steps,
-        )
-        runtime.run()
-
-        # ── Post-replay summary ────────────────────────────────────────
-        if environment.predicted_actions:
-            predicted = np.stack(environment.predicted_actions)
-            gt = environment.ground_truth_actions[: len(predicted)]
-            mae = np.mean(np.abs(predicted[:, :14] - gt[:, :14]))
-            logging.info(
-                "Replay finished: %d steps, MAE vs ground-truth: %.6f",
-                len(predicted),
-                mae,
+        logging.info("Replay mode (offline): loading %s", args.replay_dataset)
+        with h5py.File(args.replay_dataset, "r") as f:
+            actions: np.ndarray = f["/action"][()]
+            has_base_action = "base_action" in f
+            base_actions: np.ndarray | None = (
+                f["/base_action"][()] if has_base_action else None
             )
+
+        num_steps = actions.shape[0]
+        action_dim = actions.shape[1] if actions.ndim > 1 else 0
+
+        for i in range(num_steps):
+            arm = actions[i]
+            arm_str = ", ".join(f"{v:.4f}" for v in arm[:14])
+            if base_actions is not None and i < len(base_actions):
+                base = base_actions[i]
+                base_str = f"[{base[0]:.4f}, {base[1]:.4f}]"
+            elif action_dim >= 16:
+                base_str = f"[{arm[14]:.4f}, {arm[15]:.4f}]"
+            else:
+                base_str = "N/A"
+            logging.info(
+                "Replay step %d/%d -- arm: [%s] base: %s",
+                i, num_steps, arm_str, base_str,
+            )
+
+        logging.info(
+            "Replay complete: %d steps, action_dim=%d, has_base_action=%s",
+            num_steps, action_dim, has_base_action,
+        )
         return
 
     navigation_requested = args.use_llm_planner and bool(prompt)
@@ -90,12 +90,14 @@ def main(args: Args) -> None:
     if navigation_requested:
         args.planner.validate_service_config()
 
-    ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
-        host=args.host,
-        port=args.port,
-    )
-    metadata = ws_client_policy.get_server_metadata()
-    logging.info("Server metadata: %s", metadata)
+    metadata = {}
+    if not args.navigation_only:
+        ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
+            host=args.host,
+            port=args.port,
+        )
+        metadata = ws_client_policy.get_server_metadata()
+        logging.info("Server metadata: %s", metadata)
 
     if args.save_log:
         _logger.InputJointStateLogger()
@@ -135,6 +137,11 @@ def main(args: Args) -> None:
         logging.info('Navigation status: {"status": "navigation_skipped", "reason": "use_llm_planner is false"}')
         logging.info("Navigation skipped; starting manipulation runtime.")
 
+    if args.navigation_only:
+        logging.info("--navigation-only: skipping manipulation runtime.")
+        _base_safety.stop_base(environment.ros_operator)
+        return
+
     runtime = _runtime.Runtime(
         environment=environment,
         agent=_policy_agent.PolicyAgent(
@@ -157,4 +164,4 @@ def main(args: Args) -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, force=True)
-    tyro.cli(main)
+    main(tyro.cli(Args))
