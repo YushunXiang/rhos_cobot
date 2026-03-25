@@ -8,6 +8,8 @@ from typing import Any
 import cv2
 from openai import OpenAI
 
+from examples.piper_real import base_safety
+from examples.piper_real.llm_utils import extract_json_text
 from examples.piper_real.planner_config import PlannerConfig
 
 
@@ -23,25 +25,6 @@ class LLMNavigationPlanner:
         self._history: list[dict[str, Any]] = []
         self._usable_steps = 0
         self._consecutive_failures = 0
-
-    def confirm_navigation_safety(self, task_prompt: str) -> bool:
-        logging.warning(
-            "Navigation safety confirmation required before moving TRACER. "
-            "Review docs/tracer-2.0-user-manual-v2.0.3-2023.09.pdf, ensure the area is clear, "
-            "keep the robot within sight, and verify the emergency stop is released."
-        )
-        logging.info("Planned task: %s", task_prompt)
-        try:
-            answer = input("Type 'yes' to allow navigation: ").strip().lower()
-        except EOFError:
-            answer = ""
-        confirmed = answer == "yes"
-        if confirmed:
-            self._log_status("navigation_confirmation", {"confirmed": True})
-        else:
-            self._log_status("navigation_confirmation", {"confirmed": False})
-            self.stop_base()
-        return confirmed
 
     def capture_front_image(self) -> str:
         if not self.ros_operator.img_front_deque:
@@ -115,7 +98,10 @@ class LLMNavigationPlanner:
         else:
             raw_text = str(content)
         raw_text = raw_text.strip()
-        raw_json = self._extract_json_text(raw_text)
+        try:
+            raw_json = extract_json_text(raw_text)
+        except ValueError as exc:
+            raise PlannerResponseError(str(exc)) from exc
         payload = json.loads(raw_json)
         if not isinstance(payload, dict):
             raise PlannerResponseError("planner response must be a JSON object")
@@ -135,7 +121,7 @@ class LLMNavigationPlanner:
         }
 
     def stop_base(self) -> None:
-        self.ros_operator.robot_base_publish([0.0, 0.0])
+        base_safety.stop_base(self.ros_operator)
 
     def run(self, task_prompt: str) -> bool:
         self._history = []
@@ -258,14 +244,16 @@ class LLMNavigationPlanner:
         except (KeyError, TypeError, ValueError) as exc:
             raise PlannerResponseError("move response missing numeric velocity fields") from exc
 
-        if abs(linear_x) > self.config.max_linear_vel:
-            raise PlannerResponseError(
-                f"planner linear velocity {linear_x} exceeds limit {self.config.max_linear_vel}"
+        try:
+            linear_x, angular_z = base_safety.enforce_base_velocity_limits(
+                linear_x,
+                angular_z,
+                max_linear_vel=self.config.max_linear_vel,
+                max_angular_vel=self.config.max_angular_vel,
+                source="planner command",
             )
-        if abs(angular_z) > self.config.max_angular_vel:
-            raise PlannerResponseError(
-                f"planner angular velocity {angular_z} exceeds limit {self.config.max_angular_vel}"
-            )
+        except ValueError as exc:
+            raise PlannerResponseError(str(exc)) from exc
 
         duration = payload.get("duration", self.config.default_duration)
         try:
@@ -296,14 +284,3 @@ class LLMNavigationPlanner:
         else:
             logging.warning("Navigation status: %s", json.dumps(payload, ensure_ascii=False))
 
-    @staticmethod
-    def _extract_json_text(raw_text: str) -> str:
-        stripped = raw_text.strip()
-        if stripped.startswith("```"):
-            stripped = stripped.strip("`")
-            stripped = stripped.replace("json\n", "", 1).strip()
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start == -1 or end == -1 or end < start:
-            raise PlannerResponseError("planner response did not contain JSON")
-        return stripped[start : end + 1]
