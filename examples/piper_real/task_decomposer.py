@@ -3,8 +3,7 @@
 import dataclasses
 import json
 import logging
-from typing import Any
-
+import openai
 from openai import OpenAI
 
 from examples.piper_real.llm_utils import extract_json_text
@@ -51,7 +50,7 @@ class TaskDecomposer:
         for attempt in range(_MAX_ATTEMPTS):
             try:
                 return self._attempt_decompose(task_prompt)
-            except (ValueError, KeyError, TypeError) as exc:
+            except (ValueError, KeyError, TypeError, openai.APIError) as exc:
                 last_error = exc
                 logging.warning(
                     "Decomposition attempt %d/%d failed: %s",

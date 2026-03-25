@@ -92,8 +92,12 @@ def main(args: Args) -> None:
         )
         return
 
-    # ── Stationary manipulation (no LLM planner) ─────────────────────
-    if not args.use_llm_planner:
+    # ── Stationary manipulation (no LLM planner, or LLM planner with empty prompt) ──
+    if not args.use_llm_planner or not prompt:
+        if args.use_llm_planner:
+            args.planner.validate_service_config()
+            logging.info("LLM planner enabled but prompt is empty; running stationary manipulation.")
+
         ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
             host=args.host,
             port=args.port,
@@ -128,40 +132,6 @@ def main(args: Args) -> None:
 
     # ── Two-layer LLM planner ────────────────────────────────────────
     args.planner.validate_service_config()
-
-    if not prompt:
-        logging.info("LLM planner enabled but prompt is empty; running stationary manipulation.")
-        # Fall through — create server connection and run a single manipulation episode
-        ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
-            host=args.host,
-            port=args.port,
-        )
-        metadata = ws_client_policy.get_server_metadata()
-        logging.info("Server metadata: %s", metadata)
-
-        if args.save_log:
-            _logger.InputJointStateLogger()
-            _logger.OutputJointStateLogger()
-
-        environment = _env.PiperRealEnvironment(
-            reset_position=metadata.get("reset_pose"),
-            prompt=args.prompt,
-        )
-        runtime = _runtime.Runtime(
-            environment=environment,
-            agent=_policy_agent.PolicyAgent(
-                policy=action_chunk_broker.ActionChunkBroker(
-                    policy=ws_client_policy,
-                    action_horizon=args.action_horizon,
-                )
-            ),
-            subscribers=[],
-            max_hz=50,
-            num_episodes=args.num_episodes,
-            max_episode_steps=args.max_episode_steps,
-        )
-        runtime.run()
-        return
 
     # Step 0: Validate motion limits early to avoid wasting an LLM call
     if args.use_robot_base:
