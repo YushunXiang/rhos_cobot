@@ -39,11 +39,20 @@ class Args:
 def main(args: Args) -> None:
     prompt = args.prompt.strip()
 
-    if args.navigation_only:
-        args.use_llm_planner = True
+    if args.navigation_only and not args.use_llm_planner:
+        logging.error("--navigation-only requires --use-llm-planner.")
+        return
+
+    if args.use_robot_base and not args.use_llm_planner:
+        logging.error("--use-robot-base requires --use-llm-planner.")
+        return
 
     if args.navigation_only and args.replay_dataset:
         logging.error("--navigation-only and --replay-dataset are mutually exclusive.")
+        return
+
+    if args.use_llm_planner and args.replay_dataset:
+        logging.error("--use-llm-planner and --replay-dataset are mutually exclusive.")
         return
 
     # ── Replay mode: pure offline HDF5 data inspection ────────────────
