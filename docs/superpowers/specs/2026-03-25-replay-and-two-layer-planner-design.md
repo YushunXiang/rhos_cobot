@@ -17,6 +17,8 @@ When `--replay-dataset` is set, `main.py` creates a `WebsocketClientPolicy`, con
 
 When `--replay-dataset` is set, `main.py` loads the HDF5 file and iterates over ground-truth actions, printing each step. No inference server connection, no `Runtime`, no ROS.
 
+**Note**: This intentionally removes the inference-comparison capability from replay mode. The previous behavior (connect to server, predict, compute MAE) is no longer needed — replay mode is now a pure data inspection tool.
+
 ### Flow
 
 ```
@@ -30,9 +32,9 @@ replay_dataset is set
 
 ### Output format
 
-Per-step structured log line:
+Per-step structured log line with full precision (`%.4f`), all 14 arm values printed:
 ```
-Replay step 0/499 -- arm: [0.001, -0.003, ...] base: [0.2, -0.1]
+Replay step 0/499 -- arm: [0.0010, -0.0030, 0.0158, ...all 14...] base: [0.2000, -0.1000]
 ```
 
 If HDF5 has no `base_action` key or action dimension < 16, base shows `N/A`.
@@ -89,7 +91,16 @@ System prompt instructs the LLM to return JSON only:
 Validation:
 - `subtasks` must be a non-empty list.
 - Each entry must have `type` in `{"navigate", "manipulate"}` and a non-empty `prompt`.
-- On invalid response, retry up to 3 times, then error out.
+- On invalid response, retry up to 3 times (4 attempts total, no delay between retries). On final failure, raise an exception that propagates to `main.py`, which logs the error and exits.
+- Maximum subtask count: 10. If the LLM returns more than 10 subtasks, treat as invalid response and retry.
+
+#### Single-manipulate prompts
+
+If the prompt describes a pure manipulation task with no navigation (e.g., "pick up the cup"), the decomposer should return a single-element list: `[{"type": "manipulate", "prompt": "pick up the cup"}]`. The system prompt for the decomposer must explicitly encourage this.
+
+#### `set_prompt()` method
+
+`PiperRealEnvironment.set_prompt(prompt: str)` simply sets `self._prompt = prompt`. It does NOT propagate to the underlying `_real_env` or `ros_operator` — the prompt is only consumed in `get_observation()` return dict.
 
 #### Config reuse
 
@@ -101,7 +112,7 @@ No structural changes. `run(task_prompt)` now receives a single navigate subtask
 
 ### main.py subtask execution loop
 
-When `use_llm_planner=True` and prompt is non-empty:
+When `use_llm_planner=True` and prompt is non-empty (if prompt is empty, skip decomposition and log "LLM planner enabled but prompt is empty; skipping to stationary manipulation"):
 
 ```
 1. TaskDecomposer.decompose(prompt) -> subtask_list
@@ -127,8 +138,10 @@ When `use_llm_planner=True` and prompt is non-empty:
 - **Each manipulate subtask starts an independent Runtime run** with that subtask's prompt.
 - **Navigate failure aborts the entire task** -- stop_base, no further subtasks.
 - **Safety confirmation**: once before the first subtask that requires base motion (same as current).
-- **WebsocketClientPolicy creation**: only if subtask_list contains manipulate subtasks AND not navigation_only. Deferred until first manipulate subtask, or created once upfront.
-- **Manipulate subtasks always output 14-dim actions** (arm only). `use_robot_base` does NOT control policy-driven base velocity during manipulation.
+- **WebsocketClientPolicy creation**: created once upfront before the subtask loop, but only if the subtask list contains at least one manipulate entry AND `navigation_only` is false. Otherwise no server connection.
+- **PiperRealEnvironment lifecycle**: created once upfront. Between manipulate subtasks, `reset()` is called. The prompt is updated per subtask via a new `set_prompt(str)` method on `PiperRealEnvironment`.
+- **Action truncation**: `env.py` `apply_action` truncates the action array to 14 dims BEFORE passing to `real_env.step()`. `real_env.step()` continues to assume 14-dim input with 7/7 split (left arm + right arm). This is a safety-critical boundary — truncation must happen in `env.py`, not `real_env.py`.
+- **`ros_config["use_robot_base"]`**: hardcoded to `False` in `real_env.py`; the base publish block in `step()` (lines 252-254) and `_extract_base_velocity` are removed entirely. Base movement only happens via `LLMNavigationPlanner`.
 
 ### Flag semantics
 
@@ -143,16 +156,22 @@ When `use_llm_planner=True` and prompt is non-empty:
 | `use_llm_planner` | `use_robot_base` | `navigation_only` | Behavior |
 |---|---|---|---|
 | `False` | `False` | `False` | Stationary manipulation (current default) |
+| `False` | `True` | `False` | **Validation error**: `use_robot_base` requires `use_llm_planner` in the new architecture |
+| `False` | `*` | `True` | **Validation error**: `navigation_only` requires `use_llm_planner` |
 | `True` | `True` | `False` | Decompose -> navigate (move) + manipulate (execute) |
 | `True` | `False` | `False` | Decompose -> navigate (dry-run print) + manipulate (execute) |
 | `True` | `True` | `True` | Decompose -> navigate (move) only, skip manipulate |
 | `True` | `False` | `True` | Decompose -> navigate (dry-run print) only, skip manipulate |
 | `*` | `*` | replay | Pure HDF5 playback, print actions, no server |
 
-### Mutual exclusions
+### Validation rules
 
-- `--replay-dataset` and `--use-llm-planner` are mutually exclusive (existing check).
 - `--replay-dataset` and `--navigation-only` are mutually exclusive (existing check).
+- `--replay-dataset` and `--use-llm-planner` are mutually exclusive (**new check** to add).
+- `--use-robot-base` requires `--use-llm-planner` (**new check**; the old mode of policy-driven base velocity during manipulation is removed).
+- `--navigation-only` requires `--use-llm-planner` (**new explicit check**; current code implicitly coerces this, new code should validate and error).
+
+All validation checks go at the top of `main()`, before any resource creation, matching the existing pattern (lines 42-47).
 
 ## Files changed summary
 
@@ -160,9 +179,27 @@ When `use_llm_planner=True` and prompt is non-empty:
 |---|---|
 | `examples/piper_real/main.py` | Replay branch rewrite; new subtask execution loop |
 | `examples/piper_real/task_decomposer.py` | New file: TaskDecomposer + Subtask dataclass |
-| `examples/piper_real/env.py` | Remove `use_robot_base` / base velocity params (manipulate is arm-only) |
-| `examples/piper_real/real_env.py` | Remove `_extract_base_velocity` from `step()`, remove base publish in step |
+| `examples/piper_real/env.py` | Remove `use_robot_base` / base velocity params; add `set_prompt()` method; truncate action to 14 dims in `apply_action` |
+| `examples/piper_real/real_env.py` | Remove `_extract_base_velocity` from `step()`, remove base publish in step; remove `use_robot_base` param |
 | `examples/piper_real/planner_config.py` | No changes needed |
 | `examples/piper_real/base_safety.py` | No changes needed |
-| `examples/piper_real/llm_planner.py` | No changes needed |
-| `docs/deploy.md` | Update CLI docs, flag semantics, examples |
+| `examples/piper_real/llm_planner.py` | Remove `_extract_json_text` (moved to `llm_utils.py`), import from shared utility |
+| `examples/piper_real/llm_utils.py` | New file: shared `extract_json_text` utility |
+| `docs/deploy.md` | Update CLI docs, flag semantics, examples, new validation rules |
+
+## Implementation notes
+
+### Decomposition logging
+
+After `TaskDecomposer.decompose()`, log the full subtask list in JSON format:
+```
+Task decomposition: {"subtasks": [{"type": "navigate", "prompt": "..."}, ...], "count": 4}
+```
+
+### Shared JSON extraction
+
+`LLMNavigationPlanner._extract_json_text` should be extracted into a shared utility (e.g., `llm_utils.py`) since `TaskDecomposer` needs identical JSON-from-LLM-response parsing.
+
+### Runtime per manipulate subtask
+
+Each manipulate subtask uses the same `Runtime` configuration (`max_hz=50`, `num_episodes=1`, `max_episode_steps` from args). The environment is reused but `reset()` is called and prompt is updated via `set_prompt()` before each run.
