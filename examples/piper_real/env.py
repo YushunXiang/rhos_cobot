@@ -20,7 +20,10 @@ class PiperRealEnvironment(_environment.Environment):
         render_width: int = 224,
         prompt: str = "",
     ) -> None:
-        self._env = _real_env.make_real_env(init_node=True, reset_position=reset_position)
+        self._env = _real_env.make_real_env(
+            init_node=True,
+            reset_position=reset_position,
+        )
         self._prompt = prompt
         self._render_height = render_height
         self._render_width = render_width
@@ -30,10 +33,12 @@ class PiperRealEnvironment(_environment.Environment):
         if self.save_obs:
             self.saver = _obs_saver()
 
-
     @property
     def ros_operator(self):
         return self._env.ros_operator
+
+    def set_prompt(self, prompt: str) -> None:
+        self._prompt = prompt
 
     @override
     def reset(self) -> None:
@@ -49,7 +54,7 @@ class PiperRealEnvironment(_environment.Environment):
             raise RuntimeError("Timestep is not set. Call reset() first.")
 
         obs = self._ts.observation
-        
+
         for k in list(obs["images"].keys()):
             if "_depth" in k:
                 del obs["images"][k]
@@ -59,14 +64,11 @@ class PiperRealEnvironment(_environment.Environment):
                 image_tools.resize_with_pad(obs["images"][cam_name], self._render_height, self._render_width)
             )
             obs["images"][cam_name] = einops.rearrange(img, "h w c -> c h w")
-            
-        #normalization for qpos puppet gript: TODO
 
-        # 保存观察结果
         if self.save_obs:
-            self.frame_cnt = self.frame_cnt+1
+            self.frame_cnt = self.frame_cnt + 1
             self.saver.save_input_state_to_csv(obs["qpos"])
-            self.saver.save_images_to_folder(obs["images"],frame_id=self.frame_cnt)
+            self.saver.save_images_to_folder(obs["images"], frame_id=self.frame_cnt)
         print("main obs")
         return {
             "state": obs["qpos"],
@@ -76,7 +78,6 @@ class PiperRealEnvironment(_environment.Environment):
 
     @override
     def apply_action(self, action: dict) -> None:
-        # 如果actions在字典中，则保存动作
         if self.save_obs and "actions" in action:
             self.saver.save_output_action_to_csv(action["actions"])
             print(f"action: {action['actions']}")
@@ -84,9 +85,8 @@ class PiperRealEnvironment(_environment.Environment):
         stop_flag = action.get("STOP", False)
         print(f"STOP_SIGNAL: {stop_flag}")
         if "actions" in action:
-            self._ts = self._env.step(action["actions"], STOP=stop_flag)
+            raw = action["actions"]
+            truncated = raw[:14] if len(raw) > 14 else raw
+            self._ts = self._env.step(truncated, STOP=stop_flag)
         else:
             self._ts = self._env.step(None, STOP=stop_flag)
-        
-
-

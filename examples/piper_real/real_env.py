@@ -1,16 +1,16 @@
 
 
 from typing import Optional, List
+
+import cv2
 import dm_env
 import numpy as np
-
-#this is a ROS package
 import rospy
-import cv2
 import torch
 
 from threading import Thread
-from  examples.piper_real import ros_oper as _ros_oper
+from examples.piper_real import base_safety
+from examples.piper_real import ros_oper as _ros_oper
 
 #this is  a camera name list for config
 CAMERA_NAMES = ['cam_high', 'cam_right_wrist', 'cam_left_wrist']
@@ -79,7 +79,13 @@ class PiperRealEnv:
                                    "cam_right_wrist": (480x640x3)} # h, w, c, dtype='uint8'
     """
 
-    def __init__(self, init_node, *, reset_pos:Optional[List[float]] = None, setup_robots: bool = False):
+    def __init__(
+        self,
+        init_node,
+        *,
+        reset_pos: Optional[List[float]] = None,
+        setup_robots: bool = False,
+    ):
         if init_node:
             rospy.init_node('joint_state_publisher_pi0_debug', anonymous=True)
             self.spin_thread = Thread(target=self.spin)
@@ -87,7 +93,6 @@ class PiperRealEnv:
         self._reset_pos = reset_pos
         self.ros_operator = _ros_oper.RosOperator(ros_config)
         self.rate = rospy.Rate(ros_config["publish_rate"])
-        # self.action = None
         self.pre_action = np.zeros(ros_config['state_dim'])
 
     def spin(self):
@@ -191,6 +196,7 @@ class PiperRealEnv:
         # 如果STOP的话直接跳过动作发布
         if STOP:
             # 可以选择直接返回当前观测，或执行一个空动作
+            base_safety.stop_base(self.ros_operator)
             print("[STOP] skipping action publish.")
             return dm_env.TimeStep(
                 step_type=dm_env.StepType.MID,
@@ -214,9 +220,6 @@ class PiperRealEnv:
             if  not ros_config["disable_puppet_arm"]:
                 self.ros_operator.puppet_arm_publish(left_action, right_action)  # puppet_arm_publish_continuous_thread
 
-            if ros_config["use_robot_base"]:
-                vel_action = act[14:16]
-                self.ros_operator.robot_base_publish(vel_action)
             self.rate.sleep()
 
         self.pre_action = action.copy()
@@ -232,5 +235,14 @@ class PiperRealEnv:
 
 
 
-def make_real_env(init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True) -> PiperRealEnv:
-    return PiperRealEnv(init_node, reset_pos=reset_position, setup_robots=setup_robots)
+def make_real_env(
+    init_node,
+    *,
+    reset_position: Optional[List[float]] = None,
+    setup_robots: bool = True,
+) -> PiperRealEnv:
+    return PiperRealEnv(
+        init_node,
+        reset_pos=reset_position,
+        setup_robots=setup_robots,
+    )
