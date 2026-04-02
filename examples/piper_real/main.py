@@ -20,7 +20,7 @@ from examples.piper_real import llm_planner as _llm_planner
 from examples.piper_real.planner_config import PlannerConfig
 from examples.piper_real import task_decomposer as _task_decomposer
 
-ROUTINE = [[(-0.2, 0.0), (1.57, 0.0), (0.5, 0.0), (1.57, 0.0), (0.2, 0.0)],
+BASE_ROUTINE = [[(-0.2, 0.0), (1.57, 0.0), (0.5, 0.0), (1.57, 0.0), (0.2, 0.0)],
            [(-0.2, 0.0), (-1.57, 0.0), (0.5, 0.0), (-1.57, 0.0), (0.2, 0.0)]]
 
 @dataclasses.dataclass
@@ -201,6 +201,7 @@ def main(args: Args) -> None:
 
     # Step 6: Execute subtask loop
     try:
+        routine_idx = 0
         for idx, subtask in enumerate(subtask_list):
             logging.info(
                 "Executing subtask %d/%d [%s]: %s",
@@ -210,18 +211,30 @@ def main(args: Args) -> None:
             if subtask.type == "navigate":
                 if args.use_robot_base:
                     if args.fixed_navigation:
-                        planner.run_routine(ROUTINE[0])
-                    if not planner.run(task_prompt=subtask.prompt):
-                        _base_safety.stop_base(environment.ros_operator)
-                        logging.error(
-                            "Navigation failed at subtask %d/%d; aborting.",
-                            idx + 1, len(subtask_list),
-                        )
-                        return
-                    logging.info("Navigate subtask %d/%d succeeded.", idx + 1, len(subtask_list))
+                        if not planner.run_routine(BASE_ROUTINE[routine_idx]):
+                            _base_safety.stop_base(environment.ros_operator)
+                            logging.error(
+                                "Fixed navigation routine failed at subtask %d/%d; aborting.",
+                                idx + 1, len(subtask_list),
+                            )
+                            routine_idx = (routine_idx + 1) % len(BASE_ROUTINE)
+                    else:
+                        if not planner.run(task_prompt=subtask.prompt):
+                            _base_safety.stop_base(environment.ros_operator)
+                            logging.error(
+                                "Navigation failed at subtask %d/%d; aborting.",
+                                idx + 1, len(subtask_list),
+                            )
+                            return
+                        logging.info("Navigate subtask %d/%d succeeded.", idx + 1, len(subtask_list))
                 else:
-                    if args.fixed_navigation:
-                        planner.run_routine(ROUTINE[0])
+                    # if args.fixed_navigation:
+                    #     if not planner.run_routine(BASE_ROUTINE[0]):
+                    #         _base_safety.stop_base(environment.ros_operator)
+                    #         logging.error(
+                    #             "Fixed navigation routine failed at subtask %d/%d; aborting.",
+                    #             idx + 1, len(subtask_list),
+                    #         )
                     logging.info("Navigate (dry-run): %s", subtask.prompt)
 
             elif subtask.type == "manipulate":

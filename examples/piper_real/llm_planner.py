@@ -246,34 +246,146 @@ class LLMNavigationPlanner:
                 )
                 return False
 
-    def run_routine(self, routine: list[tuple[float, float]]) -> None:
-        control_hz = 10.0
+    def run_routine(self, routine: list[tuple[float, float]]) -> bool:
+        self._history = []
+        self._usable_steps = 0
+        self._consecutive_failures = 0
+        self.stop_base()
+
+        if not routine:
+            self._append_event(
+                {
+                    "cycle": 0,
+                    "type": "stop",
+                    "usable_steps": self._usable_steps,
+                    "reason": "routine is empty",
+                    "raw_payload": "",
+                }
+            )
+            self._log_status(
+                "navigation_succeeded",
+                {"cycle": 0, "reason": "routine is empty", "usable_steps": self._usable_steps},
+            )
+            return True
+
         # Use conservative open-loop speeds to reduce overshoot risk.
         linear_speed = 0.6 * self.config.max_linear_vel
         angular_speed = 0.6 * self.config.max_angular_vel
 
-        self.stop_base()
-        for idx, (target_x_raw, target_yaw_raw) in enumerate(routine, start=1):
-            target_x = float(target_x_raw)
-            target_yaw = float(target_yaw_raw)
+        cycle_index = 0
+        for target_x_raw, target_yaw_raw in routine:
+            cycle_index += 1
+            try:
+                odom = self.get_odometry()
+            except PlannerResponseError as exc:
+                self.stop_base()
+                self._log_status(
+                    "navigation_failed",
+                    {
+                        "cycle": cycle_index,
+                        "reason": str(exc),
+                        "usable_steps": self._usable_steps,
+                    },
+                )
+                return False
 
-            linear_cmd = linear_speed if target_x > 0 else -linear_speed
-            angular_cmd = angular_speed if target_yaw > 0 else -angular_speed
-            duration_s = max(abs(target_x) / linear_speed, abs(target_yaw) / angular_speed)
-            logging.info(
-                "Routine step %d/%d move: distance=%.3f m, v=%.3f m/s, duration=%.2f s",
-                idx,
-                len(routine),
-                target_x,
-                linear_cmd,
-                duration_s,
+            raw_text = ""
+            try:
+                target_x = float(target_x_raw)
+                target_yaw = float(target_yaw_raw)
+
+                linear_cmd = linear_speed if target_x > 0 else -linear_speed
+                angular_cmd = angular_speed if target_yaw > 0 else -angular_speed
+                duration_s = max(abs(target_x) / linear_speed, abs(target_yaw) / angular_speed)
+                raw_text = json.dumps(
+                    {
+                        "action": "move",
+                        "linear_x": linear_cmd,
+                        "angular_z": angular_cmd,
+                        "duration": duration_s,
+                        "reasoning": "fixed routine step",
+                    },
+                    ensure_ascii=False,
+                )
+                normalized = self._normalize_command(json.loads(raw_text))
+                logging.info(
+                    "Planner normalized decision [cycle %s]: %s",
+                    cycle_index,
+                    json.dumps(normalized, ensure_ascii=False),
+                )
+                self._consecutive_failures = 0
+            except Exception as exc:  # noqa: BLE001
+                self._consecutive_failures += 1
+                self.stop_base()
+                self._append_event(
+                    {
+                        "cycle": cycle_index,
+                        "type": "planner_failure",
+                        "error": str(exc),
+                        "raw_payload": raw_text,
+                        "consecutive_failures": self._consecutive_failures,
+                    }
+                )
+                logging.error("Planner failure on cycle %s: %s", cycle_index, exc)
+                if self._consecutive_failures >= 4:
+                    self._log_status(
+                        "navigation_failed",
+                        {
+                            "cycle": cycle_index,
+                            "reason": "planner failed 4 consecutive times",
+                            "usable_steps": self._usable_steps,
+                        },
+                    )
+                    return False
+                continue
+
+            self._usable_steps += 1
+            logging.info("Planner raw response [cycle %s]: %s", cycle_index, raw_text)
+
+            executed = self.execute_command(normalized)
+            self._append_event(
+                {
+                    "cycle": cycle_index,
+                    "type": "move",
+                    "usable_steps": self._usable_steps,
+                    "command": executed,
+                    "reasoning": normalized.get("reasoning", ""),
+                    "raw_payload": raw_text,
+                    "odom": odom,
+                }
             )
-            self._execute_command({"linear_x": linear_cmd, "angular_z": angular_cmd, "duration": duration_s, "control_hz": control_hz})
 
-            self.stop_base()
-            time.sleep(0.5)
+            if self._usable_steps >= self.config.max_nav_steps:
+                self.stop_base()
+                self._log_status(
+                    "navigation_failed",
+                    {
+                        "cycle": cycle_index,
+                        "reason": "usable planner step limit reached",
+                        "usable_steps": self._usable_steps,
+                    },
+                )
+                return False
 
         self.stop_base()
+        self._append_event(
+            {
+                "cycle": cycle_index,
+                "type": "stop",
+                "usable_steps": self._usable_steps,
+                "reason": "fixed routine completed",
+                "raw_payload": "",
+            }
+        )
+        self._log_status(
+            "navigation_succeeded",
+            {
+                "cycle": cycle_index,
+                "reason": "fixed routine completed",
+                "usable_steps": self._usable_steps,
+            },
+        )
+        return True
 
     def _normalize_command(self, payload: dict[str, Any]) -> dict[str, Any]:
         action = payload.get("action")
