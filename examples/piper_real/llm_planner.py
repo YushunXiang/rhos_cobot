@@ -120,6 +120,24 @@ class LLMNavigationPlanner:
             "duration": duration,
         }
 
+    def _execute_command(self, cmd: dict[str, Any]) -> None:
+        linear_x = float(cmd["linear_x"])
+        angular_z = float(cmd["angular_z"])
+        duration = float(cmd.get("duration", self.config.default_duration))
+        control_hz = float(cmd.get("control_hz", 10.0))
+        period = 1.0 / control_hz
+        start = time.monotonic()
+        next_tick = start
+        while time.monotonic() - start < duration:
+            self.ros_operator.robot_base_publish([linear_x, angular_z])
+            next_tick += period
+            sleep_s = next_tick - time.monotonic()
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+            else:
+                # Keep a fixed-rate schedule without accumulating drift.
+                next_tick = time.monotonic()
+
     def stop_base(self) -> None:
         base_safety.stop_base(self.ros_operator)
 
@@ -227,6 +245,35 @@ class LLMNavigationPlanner:
                     },
                 )
                 return False
+
+    def run_routine(self, routine: list[tuple[float, float]]) -> None:
+        control_hz = 10.0
+        # Use conservative open-loop speeds to reduce overshoot risk.
+        linear_speed = 0.6 * self.config.max_linear_vel
+        angular_speed = 0.6 * self.config.max_angular_vel
+
+        self.stop_base()
+        for idx, (target_x_raw, target_yaw_raw) in enumerate(routine, start=1):
+            target_x = float(target_x_raw)
+            target_yaw = float(target_yaw_raw)
+
+            linear_cmd = linear_speed if target_x > 0 else -linear_speed
+            angular_cmd = angular_speed if target_yaw > 0 else -angular_speed
+            duration_s = max(abs(target_x) / linear_speed, abs(target_yaw) / angular_speed)
+            logging.info(
+                "Routine step %d/%d move: distance=%.3f m, v=%.3f m/s, duration=%.2f s",
+                idx,
+                len(routine),
+                target_x,
+                linear_cmd,
+                duration_s,
+            )
+            self._execute_command({"linear_x": linear_cmd, "angular_z": angular_cmd, "duration": duration_s, "control_hz": control_hz})
+
+            self.stop_base()
+            time.sleep(0.5)
+
+        self.stop_base()
 
     def _normalize_command(self, payload: dict[str, Any]) -> dict[str, Any]:
         action = payload.get("action")

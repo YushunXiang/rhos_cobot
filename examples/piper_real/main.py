@@ -20,6 +20,8 @@ from examples.piper_real import llm_planner as _llm_planner
 from examples.piper_real.planner_config import PlannerConfig
 from examples.piper_real import task_decomposer as _task_decomposer
 
+ROUTINE = [[(-0.2, 0.0), (1.57, 0.0), (0.5, 0.0), (1.57, 0.0), (0.2, 0.0)],
+           [(-0.2, 0.0), (-1.57, 0.0), (0.5, 0.0), (-1.57, 0.0), (0.2, 0.0)]]
 
 @dataclasses.dataclass
 class Args:
@@ -34,6 +36,7 @@ class Args:
     use_llm_planner: bool = False
     use_robot_base: bool = False
     navigation_only: bool = False  # Run navigation only, skip manipulation
+    fixed_navigation: bool = True
     planner: PlannerConfig = dataclasses.field(default_factory=PlannerConfig)
 
 
@@ -206,6 +209,8 @@ def main(args: Args) -> None:
 
             if subtask.type == "navigate":
                 if args.use_robot_base:
+                    if args.fixed_navigation:
+                        planner.run_routine(ROUTINE[0])
                     if not planner.run(task_prompt=subtask.prompt):
                         _base_safety.stop_base(environment.ros_operator)
                         logging.error(
@@ -215,6 +220,8 @@ def main(args: Args) -> None:
                         return
                     logging.info("Navigate subtask %d/%d succeeded.", idx + 1, len(subtask_list))
                 else:
+                    if args.fixed_navigation:
+                        planner.run_routine(ROUTINE[0])
                     logging.info("Navigate (dry-run): %s", subtask.prompt)
 
             elif subtask.type == "manipulate":
