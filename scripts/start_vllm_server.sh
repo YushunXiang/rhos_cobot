@@ -4,11 +4,17 @@
 
 set -euo pipefail
 
-REMOTE_HOST="nas-local"
-SESSION_NAME="vllm-qwen-planner"
-WORK_DIR="/home/web/yushun/llm-planner"
-MODEL_PATH="models/Qwen/Qwen3.5-4B"
-SERVED_MODEL_NAME="Qwen/Qwen3.5-4B"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CONFIG="$REPO_ROOT/config/servers.toml"
+
+_cfg() { python3 "$SCRIPT_DIR/_read_toml.py" "$CONFIG" "$1"; }
+
+REMOTE_HOST="$(_cfg vllm.remote.host)"
+SESSION_NAME="$(_cfg vllm.remote.session_name)"
+WORK_DIR="$(_cfg vllm.remote.work_dir)"
+MODEL_PATH="$(_cfg vllm.remote.model_path)"
+SERVED_MODEL_NAME="$(_cfg vllm.remote.served_model_name)"
 
 echo "Stopping existing '$SESSION_NAME' session (if any)..."
 ssh "$REMOTE_HOST" "tmux kill-session -t $SESSION_NAME 2>/dev/null || true"
@@ -18,6 +24,6 @@ ssh "$REMOTE_HOST" "tmux new-session -d -s $SESSION_NAME \
   'bash -l -c \"cd $WORK_DIR && uv run vllm serve $MODEL_PATH --served-model-name $SERVED_MODEL_NAME\"; exec bash'"
 
 echo "Server starting in tmux session '$SESSION_NAME' on $REMOTE_HOST."
-echo "Expected planner base URL: http://192.168.3.123:8000/v1"
+echo "Expected planner base URL: http://192.168.3.123:$(_cfg vllm.port)/v1"
 echo "Expected planner model: $SERVED_MODEL_NAME"
 echo "To view logs:  ssh $REMOTE_HOST -t 'tmux attach -t $SESSION_NAME'"

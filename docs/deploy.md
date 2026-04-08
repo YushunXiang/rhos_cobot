@@ -41,6 +41,14 @@ init_deploy
 source examples/piper_real/.venv/bin/activate
 ```
 
+首次部署前先准备服务端配置：
+
+```bash
+cp config/servers.example.toml config/servers.toml
+```
+
+然后按你的实际环境修改 `config/servers.toml` 里的主机名、模型路径、checkpoint 路径和端口。该文件用于本地部署，不应提交到 git。
+
 ### 1.1 TRACER 底盘预检
 
 运行 deploy 前，人工确认：
@@ -78,6 +86,146 @@ candump can0
 
 如果你当前底盘桥接的是官方 CAN 栈，这一步是 deploy 前必须检查的前置条件。
 
+### 1.4 从 `start_servers.sh` 到 `main.py` 的脚本模板
+
+`bash scripts/start_servers.sh [local|remote]` 只负责按 `config/servers.toml` 拉起两个服务：
+
+- qwen-vl / vLLM planner server
+- pi0 / OpenPI policy server
+
+真正执行推理的入口仍然是 `python -m examples.piper_real.main`。运行前先区分两条连接链路：
+
+- `--host` / `--port`：连接 pi0 policy server（WebSocket）
+- `--planner.base-url`：连接 qwen-vl / vLLM planner（OpenAI-compatible HTTP）
+
+`main.py` 现在默认会在启动前做一次 fail-fast server 预检：pi0 会检查 websocket 握手和 `reset`，planner 会检查 `/v1/models`。如果你明确想跳过这一步，可传 `--skip-server-checks`；超时时间可用 `--server-check-timeout-sec` 调整。
+
+`config/servers.toml` 里的 `*.remote.host` 通常是 SSH 别名或远端登录名；传给 `main.py` 的地址应当是机器人工作站实际可达的 IP 或主机名，而不是机械照抄 SSH 别名。
+
+下面给出几种常见脚本模板。
+
+#### 1.4.1 本机启动两个服务，然后执行完整推理
+
+适用于 qwen-vl、pi0 和 `examples/piper_real/main.py` 都运行在同一台机器。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd ~/rhos_cobot
+conda activate aloha
+init_deploy
+source examples/piper_real/.venv/bin/activate
+
+CONFIG=config/servers.toml
+PI0_HOST=127.0.0.1
+PI0_PORT="$(python3 scripts/_read_toml.py "$CONFIG" pi0.port)"
+PLANNER_HOST=127.0.0.1
+PLANNER_PORT="$(python3 scripts/_read_toml.py "$CONFIG" vllm.port)"
+PLANNER_MODEL="$(python3 scripts/_read_toml.py "$CONFIG" vllm.local.served_model_name)"
+
+bash scripts/start_servers.sh local
+
+# 等 tmux 中两个模型都完成加载后，再执行 main.py
+python -m examples.piper_real.main \
+  --host "$PI0_HOST" \
+  --port "$PI0_PORT" \
+  --use-llm-planner \
+  --use-robot-base \
+  --prompt "移动到桌子旁边拿起红色杯子" \
+  --planner.base-url "http://$PLANNER_HOST:$PLANNER_PORT/v1" \
+  --planner.model "$PLANNER_MODEL"
+```
+
+#### 1.4.2 远端启动两个服务，然后在机器人工作站执行完整推理
+
+适用于 `bash scripts/start_servers.sh remote` 通过 SSH 到其他机器启动 qwen-vl 和 pi0，而 `main.py` 仍在当前机器人工作站执行。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd ~/rhos_cobot
+conda activate aloha
+init_deploy
+source examples/piper_real/.venv/bin/activate
+
+CONFIG=config/servers.toml
+
+# 这里填写机器人工作站真正可达的服务地址，不一定等于 config 里的 SSH host 别名
+PI0_HOST="${PI0_HOST:-192.168.3.101}"
+PLANNER_HOST="${PLANNER_HOST:-192.168.3.123}"
+PI0_PORT="$(python3 scripts/_read_toml.py "$CONFIG" pi0.port)"
+PLANNER_PORT="$(python3 scripts/_read_toml.py "$CONFIG" vllm.port)"
+PLANNER_MODEL="$(python3 scripts/_read_toml.py "$CONFIG" vllm.remote.served_model_name)"
+
+bash scripts/start_servers.sh remote
+
+# 等远端 tmux 中模型加载完成后，再执行 main.py
+python -m examples.piper_real.main \
+  --host "$PI0_HOST" \
+  --port "$PI0_PORT" \
+  --use-llm-planner \
+  --use-robot-base \
+  --prompt "移动到桌子旁边拿起红色杯子" \
+  --planner.base-url "http://$PLANNER_HOST:$PLANNER_PORT/v1" \
+  --planner.model "$PLANNER_MODEL"
+```
+
+#### 1.4.3 只做操作，不启用 LLM planner
+
+这种场景不需要 qwen-vl / vLLM，只需要 pi0 policy server。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd ~/rhos_cobot
+conda activate aloha
+init_deploy
+source examples/piper_real/.venv/bin/activate
+
+CONFIG=config/servers.toml
+PI0_HOST=127.0.0.1
+PI0_PORT="$(python3 scripts/_read_toml.py "$CONFIG" pi0.port)"
+
+bash scripts/start_pi0_server_local.sh
+
+python -m examples.piper_real.main \
+  --host "$PI0_HOST" \
+  --port "$PI0_PORT" \
+  --prompt "turn on the water tap."
+```
+
+#### 1.4.4 只做导航，不连接策略服务
+
+这种场景只需要 planner server，不需要 pi0 policy server，也不需要 `--host` / `--port`。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd ~/rhos_cobot
+conda activate aloha
+init_deploy
+source examples/piper_real/.venv/bin/activate
+
+CONFIG=config/servers.toml
+PLANNER_HOST="${PLANNER_HOST:-192.168.3.123}"
+PLANNER_PORT="$(python3 scripts/_read_toml.py "$CONFIG" vllm.port)"
+PLANNER_MODEL="$(python3 scripts/_read_toml.py "$CONFIG" vllm.remote.served_model_name)"
+
+bash scripts/start_vllm_server.sh
+
+python -m examples.piper_real.main \
+  --use-llm-planner \
+  --use-robot-base \
+  --navigation-only \
+  --prompt "依次移动到厨房和客厅" \
+  --planner.base-url "http://$PLANNER_HOST:$PLANNER_PORT/v1" \
+  --planner.model "$PLANNER_MODEL"
+```
+
 ## 2. 最小运行命令
 
 不使用 LLM planner，不使用底盘控制，仅手臂操作：
@@ -85,11 +233,11 @@ candump can0
 ```bash
 python -m examples.piper_real.main \
   --host 192.168.3.101 \
-  --port 8000 \
+  --port 8001 \
   --prompt "turn on the water tap."
 ```
 
-`--host` 和 `--port` 对应 xtrainer 的 IP 和 pi remote server 的端口，运行前请确认。
+`--host` 和 `--port` 对应 pi0 policy server 的地址和端口；只有在启用 `--use-llm-planner` 时，才需要额外配置 `--planner.base-url` 指向 qwen-vl / vLLM planner。
 
 ## 3. CLI 开关
 
@@ -111,34 +259,42 @@ Flag 组合规则：
 ```bash
 # 仅手臂操作（默认行为，不使用 LLM planner）
 python -m examples.piper_real.main \
-  --host 192.168.3.101 --port 8000 \
+  --host 192.168.3.101 --port 8001 \
   --prompt "turn on the water tap."
 
 # LLM 拆解 + 导航移动 + 手臂操作
 python -m examples.piper_real.main \
-  --host 192.168.3.101 --port 8000 \
+  --host 192.168.3.101 --port 8001 \
   --use-llm-planner \
   --use-robot-base \
-  --prompt "移动到桌子旁边拿起红色杯子"
+  --prompt "移动到桌子旁边拿起红色杯子" \
+  --planner.base-url http://192.168.3.123:8000/v1 \
+  --planner.model Qwen/Qwen3.5-4B
 
 # LLM 拆解 + 导航仅打印（dry-run）+ 手臂操作
 python -m examples.piper_real.main \
-  --host 192.168.3.101 --port 8000 \
+  --host 192.168.3.101 --port 8001 \
   --use-llm-planner \
-  --prompt "移动到桌子旁边拿起红色杯子"
+  --prompt "移动到桌子旁边拿起红色杯子" \
+  --planner.base-url http://192.168.3.123:8000/v1 \
+  --planner.model Qwen/Qwen3.5-4B
 
 # 仅导航（实际移动底盘，跳过操作）
 python -m examples.piper_real.main \
   --use-llm-planner \
   --use-robot-base \
   --navigation-only \
-  --prompt "依次移动到厨房和客厅"
+  --prompt "依次移动到厨房和客厅" \
+  --planner.base-url http://192.168.3.123:8000/v1 \
+  --planner.model Qwen/Qwen3.5-4B
 
 # 仅导航 dry-run（仅打印计划，不移动不操作）
 python -m examples.piper_real.main \
   --use-llm-planner \
   --navigation-only \
-  --prompt "依次移动到厨房和客厅"
+  --prompt "依次移动到厨房和客厅" \
+  --planner.base-url http://192.168.3.123:8000/v1 \
+  --planner.model Qwen/Qwen3.5-4B
 ```
 
 ## 4. 底盘 ROS 话题
@@ -213,24 +369,73 @@ candump can0
 
 检查项：
 
-- `--use-llm-planner` 时，导航阶段先于手臂操作；每轮移动后有零速度停车。
-- `--use-robot-base` 时，策略推理中 `/cmd_vel` 有速度输出，但不会超过配置上限。
-- 两者均关闭时，`/cmd_vel` 无任何发布。
+- 存在 navigate subtask 且启用 `--use-robot-base` 时，导航阶段先于手臂操作；每轮移动后有零速度停车。
+- manipulate 阶段不发布 `/cmd_vel`；底盘移动只发生在 navigate subtask 中。
+- 仅手臂操作时，`/cmd_vel` 无任何发布。
 - planner 原始响应、拒绝/重试情况、执行速度和最终原因都能在日志中看到。
 - 若动作缺少底盘维度、导航失败或未确认安全，`Runtime.run()` 不会继续或会在首次非法底盘动作处终止。
 
 ## 8. 离线回放调试（`--replay-dataset`）
 
-使用已有 HDF5 数据集，逐步打印 ground-truth action，不需要推理服务器、实机或 ROS。
+使用已有 HDF5 数据集做 mock 推理验证：`main.py` 会读取回放观测，连接 pi0 policy server 做真实推理，但不需要实机、ROS 或底盘 bring-up。
+
+推荐直接使用 `bash scripts/run_piper_replay_mock.sh ...`。该脚本现在默认只启动 pi0 policy server，不再为 replay mock 额外拉起 qwen-vl / vLLM planner。
+
+### 8.1 推荐：直接用 replay mock 脚本
+
+本机模式：
 
 ```bash
-python -m examples.piper_real.main \
-  --replay-dataset /home/agilex/rhos_cobot/ocl_data/turn_on_off_tap/episode_0.hdf5
+bash scripts/run_piper_replay_mock.sh local
 ```
 
-回放模式下：
+远端模式：
 
-- 不连接推理服务器，不需要 `--host` 和 `--port`。
-- 从 HDF5 文件逐帧打印 action（arm 14 维 + base 2 维，如有）。
-- 回放结束后输出汇总（总步数、action 维度、是否包含 base_action）。
-- `--use-llm-planner` 和 `--replay-dataset` 互斥。
+```bash
+PI0_HOST=192.168.3.101 bash scripts/run_piper_replay_mock.sh remote
+```
+
+如果你已经手动起好了 pi0，也可以直接跳过启动逻辑：
+
+```bash
+START_SERVERS=0 PYTHON_CMD=examples/piper_real/.venv/bin/python \
+  bash scripts/run_piper_replay_mock.sh none
+```
+
+若你明确想把 qwen-vl / vLLM 也一起启动，再显式传：
+
+```bash
+START_TARGET=all bash scripts/run_piper_replay_mock.sh local
+```
+
+### 8.2 兼容方式：手动启动后执行 `main.py`
+
+下面示例假设你在本机启动两个服务。若使用 `remote` 模式，把 `PI0_HOST` 改成机器人工作站可达的实际地址即可。
+
+```bash
+CONFIG=config/servers.toml
+PI0_HOST=127.0.0.1
+PI0_PORT="$(python3 scripts/_read_toml.py "$CONFIG" pi0.port)"
+
+bash scripts/start_servers.sh local
+
+python -m examples.piper_real.main \
+  --host "$PI0_HOST" \
+  --port "$PI0_PORT" \
+  --prompt "long-horizon replay mock validation" \
+  --replay-dataset /inspire/qb-ilm/project/robot-reasoning/xiangyushun-p-xiangyushun/yushun/aloha-data/long-horizon-demo/episode_4.hdf5 \
+  --max-episode-steps 0
+```
+
+如果只想启动 pi0 policy server，也可以把 `bash scripts/start_servers.sh local` 换成 `bash scripts/start_pi0_server_local.sh`。
+
+### 8.3 行为与限制
+
+回放 mock 模式下：
+
+- 会连接 pi0 policy server，因此 `--host` 和 `--port` 必填且必须可达。
+- 不初始化 ROS，不访问真实相机，也不会发布 `/cmd_vel` 或机械臂话题。
+- 每一步会把 HDF5 里的 `qpos + images + prompt` 送进 policy server，并记录预测动作。
+- 回放结束后会输出汇总，包括实际执行步数、`arm_mae`，以及在模型输出包含底盘维度时的 `base_mae`。
+- `--use-llm-planner`、`--use-robot-base`、`--navigation-only` 都和 `--replay-dataset` 互斥。
+- `episode_4.hdf5` 一共有 3750 steps；若沿用默认 `--max-episode-steps 1000`，会被提前截断。因此完整 long-horizon 验证请显式传 `--max-episode-steps 0`。

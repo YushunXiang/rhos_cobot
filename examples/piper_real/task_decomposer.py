@@ -6,7 +6,7 @@ import logging
 import openai
 from openai import OpenAI
 
-from examples.piper_real.llm_utils import extract_json_text
+from examples.piper_real.llm_utils import extract_message_json_text
 from examples.piper_real.planner_config import PlannerConfig
 
 _MAX_SUBTASKS = 10
@@ -69,16 +69,8 @@ class TaskDecomposer:
                 {"role": "user", "content": task_prompt},
             ],
         )
-        content = response.choices[0].message.content
-        if isinstance(content, list):
-            raw_text = "".join(
-                part.get("text", "") if isinstance(part, dict) else getattr(part, "text", "")
-                for part in content
-            )
-        else:
-            raw_text = str(content)
-
-        raw_json = extract_json_text(raw_text.strip())
+        raw_text, raw_json = extract_message_json_text(response.choices[0].message)
+        logging.debug("Task decomposer raw LLM response: %s", raw_text)
         payload = json.loads(raw_json)
 
         subtasks_raw = payload["subtasks"]
