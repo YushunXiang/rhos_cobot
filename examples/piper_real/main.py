@@ -17,9 +17,6 @@ from examples.piper_real.planner_config import PlannerConfig
 
 DEFAULT_MAX_EPISODE_STEPS = 1000
 
-BASE_ROUTINE = [[(-0.2, 0.0), (1.57, 0.0), (0.5, 0.0), (1.57, 0.0), (0.2, 0.0)],
-           [(-0.2, 0.0), (-1.57, 0.0), (0.5, 0.0), (-1.57, 0.0), (0.2, 0.0)]]
-
 @dataclasses.dataclass
 class Args:
     host: str = "10.42.0.2"  # H100
@@ -33,7 +30,6 @@ class Args:
     use_llm_planner: bool = False
     use_robot_base: bool = False
     navigation_only: bool = False  # Run navigation only, skip manipulation
-    fixed_navigation: bool = True
     skip_server_checks: bool = False
     server_check_timeout_sec: float = 5.0
     planner: PlannerConfig = dataclasses.field(default_factory=PlannerConfig)
@@ -289,8 +285,8 @@ def main(args: Args) -> None:
 
     from examples.piper_real import base_safety as _base_safety
     from examples.piper_real import env as _env
-    from examples.piper_real import llm_planner as _llm_planner
     from examples.piper_real import logger as _logger
+    from examples.piper_real import navigation_tool as _navigation_tool
     from examples.piper_real import task_decomposer as _task_decomposer
     from openpi_client.runtime import runtime as _runtime
 
@@ -338,10 +334,6 @@ def main(args: Args) -> None:
     if not _run_required_server_checks(args, needs_planner=True):
         return
 
-    # Step 0: Validate motion limits early to avoid wasting an LLM call
-    if args.use_robot_base:
-        args.planner.validate_motion_limits()
-
     # Step 1: Decompose task
     decomposer = _task_decomposer.TaskDecomposer(args.planner)
     try:
@@ -353,6 +345,7 @@ def main(args: Args) -> None:
     has_navigate = any(s.type == "navigate" for s in subtask_list)
     has_manipulate = any(s.type == "manipulate" for s in subtask_list)
     needs_server = has_manipulate and not args.navigation_only
+    needs_ros_environment = needs_server or (args.use_robot_base and has_navigate)
 
     # Step 2: Safety confirmation (once, if base motion requested)
     if args.use_robot_base and has_navigate:
@@ -380,33 +373,18 @@ def main(args: Args) -> None:
 
     # Step 4: Create shared environment if needed
     environment = None
-    if needs_server:
-        if args.save_log:
+    if needs_ros_environment:
+        if args.save_log and needs_server:
             _logger.InputJointStateLogger()
             _logger.OutputJointStateLogger()
 
         environment = _env.PiperRealEnvironment(
-            reset_position=metadata.get("reset_pose"),
+            reset_position=metadata.get("reset_pose") if needs_server else None,
             prompt=prompt,
         )
 
-    # Step 5: Create navigation planner if needed
-    planner = None
-    if args.use_robot_base and has_navigate:
-        if environment is not None:
-            planner = _llm_planner.LLMNavigationPlanner(environment.ros_operator, args.planner)
-        else:
-            # Navigation-only mode: need ROS for base movement but no manipulation env
-            # Create a minimal environment just for ros_operator access
-            environment = _env.PiperRealEnvironment(
-                reset_position=None,
-                prompt=prompt,
-            )
-            planner = _llm_planner.LLMNavigationPlanner(environment.ros_operator, args.planner)
-
     # Step 6: Execute subtask loop
     try:
-        routine_idx = 0
         for idx, subtask in enumerate(subtask_list):
             logging.info(
                 "Executing subtask %d/%d [%s]: %s",
@@ -414,33 +392,22 @@ def main(args: Args) -> None:
             )
 
             if subtask.type == "navigate":
-                if args.use_robot_base:
-                    if args.fixed_navigation:
-                        if not planner.run_routine(BASE_ROUTINE[routine_idx]):
-                            _base_safety.stop_base(environment.ros_operator)
-                            logging.error(
-                                "Fixed navigation routine failed at subtask %d/%d; aborting.",
-                                idx + 1, len(subtask_list),
-                            )
-                            routine_idx = (routine_idx + 1) % len(BASE_ROUTINE)
-                    else:
-                        if not planner.run(task_prompt=subtask.prompt):
-                            _base_safety.stop_base(environment.ros_operator)
-                            logging.error(
-                                "Navigation failed at subtask %d/%d; aborting.",
-                                idx + 1, len(subtask_list),
-                            )
-                            return
-                        logging.info("Navigate subtask %d/%d succeeded.", idx + 1, len(subtask_list))
-                else:
-                    # if args.fixed_navigation:
-                    #     if not planner.run_routine(BASE_ROUTINE[0]):
-                    #         _base_safety.stop_base(environment.ros_operator)
-                    #         logging.error(
-                    #             "Fixed navigation routine failed at subtask %d/%d; aborting.",
-                    #             idx + 1, len(subtask_list),
-                    #         )
-                    logging.info("Navigate (dry-run): %s", subtask.prompt)
+                ros_operator = None if environment is None else environment.ros_operator
+                result = _navigation_tool.navigate(
+                    subtask.prompt,
+                    ros_operator,
+                    dry_run=not args.use_robot_base,
+                )
+                if not result.ok:
+                    logging.error(
+                        "Navigation failed at subtask %d/%d: %s",
+                        idx + 1, len(subtask_list), result.error or "unknown error",
+                    )
+                    return
+                logging.info(
+                    "Navigate subtask %d/%d succeeded via routine %s.",
+                    idx + 1, len(subtask_list), result.routine_name,
+                )
 
             elif subtask.type == "manipulate":
                 if args.navigation_only:
