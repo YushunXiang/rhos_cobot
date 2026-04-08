@@ -1,0 +1,44 @@
+# Example server configuration for rhos_cobot deployment scripts.
+# Copy this file to config/servers.toml and update the values for your machine:
+#   cp config/servers.example.toml config/servers.toml
+
+# ---------------------------------------------------------------------------
+# Pi0 / OpenPI policy server
+# ---------------------------------------------------------------------------
+[pi0]
+policy_config = "your_policy_config"
+port = 8001
+
+[pi0.remote]
+host = "your-pi0-host"
+session_name = "pi0-infer"
+work_dir = "/path/to/openpi-or-inference-repo"
+policy_config = "your_policy_config"
+checkpoint = "checkpoints/your_policy_config/your_checkpoint"
+
+[pi0.local]
+session_name = "pi0-infer-local"
+openpi_root = "../openpi"
+policy_config = "your_policy_config"
+checkpoint = "checkpoints/your_policy_config/your_checkpoint"
+cuda_visible_devices = "0"
+
+# ---------------------------------------------------------------------------
+# vLLM planner server
+# ---------------------------------------------------------------------------
+[vllm]
+port = 8000
+host = "0.0.0.0"
+
+[vllm.remote]
+host = "your-vllm-host"
+session_name = "vllm-planner"
+work_dir = "/path/to/llm-planner"
+model_path = "/path/to/model-or-hf-cache"
+served_model_name = "Qwen/Qwen3.5-4B"
+
+[vllm.local]
+session_name = "vllm-planner-local"
+model_path = "/path/to/local/model"
+served_model_name = "Qwen/Qwen3.5-4B"
+conda_env_name = "vllm"

@@ -60,6 +60,9 @@ python -m scripts.post_collect.data_summary_simple
 ### 3. 部署推理 (deploy)
 
 ```bash
+cp config/servers.example.toml config/servers.toml
+# 按实际机器、模型路径和端口修改 config/servers.toml
+
 # 初始化环境（拔下主臂航插线，重启插排）
 sh scripts/init.sh
 

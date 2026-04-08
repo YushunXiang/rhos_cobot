@@ -41,6 +41,14 @@ init_deploy
 source examples/piper_real/.venv/bin/activate
 ```
 
+首次部署前先准备服务端配置：
+
+```bash
+cp config/servers.example.toml config/servers.toml
+```
+
+然后按你的实际环境修改 `config/servers.toml` 里的主机名、模型路径、checkpoint 路径和端口。该文件用于本地部署，不应提交到 git。
+
 ### 1.1 TRACER 底盘预检
 
 运行 deploy 前，人工确认：

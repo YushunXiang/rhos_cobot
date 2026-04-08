@@ -122,3 +122,7 @@ dmypy.json
 
 /.agents
 /.specify
+
+# Local deployment config
+config/servers.toml
+!config/servers.example.toml
