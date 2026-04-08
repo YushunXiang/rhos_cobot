@@ -16,6 +16,9 @@ from examples.piper_real.planner_config import PlannerConfig
 
 
 DEFAULT_MAX_EPISODE_STEPS = 1000
+DEFAULT_REPLAY_MANIPULATE_MAX_STEPS = 64
+DEFAULT_REPLAY_MANIPULATE_REPLAN_INTERVAL_STEPS = 16
+_VALID_REPLAY_MODES = {"policy", "planner", "hybrid"}
 
 BASE_ROUTINE = [[(-0.2, 0.0), (1.57, 0.0), (0.5, 0.0), (1.57, 0.0), (0.2, 0.0)],
            [(-0.2, 0.0), (-1.57, 0.0), (0.5, 0.0), (-1.57, 0.0), (0.2, 0.0)]]
@@ -30,6 +33,9 @@ class Args:
     save_log: bool = False
     prompt: str = ""
     replay_dataset: str = ""  # Path to HDF5 episode file for offline replay
+    replay_mode: str = "policy"  # policy | planner | hybrid
+    replay_manipulate_max_steps: int = DEFAULT_REPLAY_MANIPULATE_MAX_STEPS
+    replay_manipulate_replan_interval_steps: int = DEFAULT_REPLAY_MANIPULATE_REPLAN_INTERVAL_STEPS
     use_llm_planner: bool = False
     use_robot_base: bool = False
     navigation_only: bool = False  # Run navigation only, skip manipulation
@@ -91,7 +97,8 @@ def _log_replay_summary(environment, executed_steps: int) -> None:
         return
 
     predicted = np.stack(environment.predicted_actions)
-    gt = environment.ground_truth_actions[: len(predicted)]
+    gt_indices = np.asarray(environment.predicted_action_steps, dtype=np.int64)
+    gt = environment.ground_truth_actions[gt_indices]
 
     arm_dim = min(14, predicted.shape[-1], gt.shape[-1])
     arm_mae = float(np.mean(np.abs(predicted[:, :arm_dim] - gt[:, :arm_dim])))
@@ -99,7 +106,7 @@ def _log_replay_summary(environment, executed_steps: int) -> None:
     base_suffix = ", base_mae=N/A"
     if predicted.shape[-1] >= 16:
         if environment.ground_truth_base_actions is not None:
-            gt_base = environment.ground_truth_base_actions[: len(predicted)]
+            gt_base = environment.ground_truth_base_actions[gt_indices]
             base_mae = float(np.mean(np.abs(predicted[:, 14:16] - gt_base)))
             base_suffix = f", base_mae={base_mae:.6f}"
         elif gt.shape[-1] >= 16:
@@ -115,6 +122,176 @@ def _log_replay_summary(environment, executed_steps: int) -> None:
         arm_mae,
         base_suffix,
     )
+
+
+def _resolve_replay_mode(args: Args) -> str:
+    replay_mode = args.replay_mode.strip().lower()
+    if replay_mode not in _VALID_REPLAY_MODES:
+        raise ValueError(
+            f"--replay-mode must be one of {sorted(_VALID_REPLAY_MODES)}, got {args.replay_mode!r}."
+        )
+    if args.use_llm_planner and replay_mode == "policy":
+        logging.info("Replay mode inferred as planner from legacy --use-llm-planner flag.")
+        return "planner"
+    return replay_mode
+
+
+def _build_replay_subtask_list(args: Args, prompt: str):
+    from examples.piper_real import task_decomposer as _task_decomposer
+
+    decomposer = _task_decomposer.TaskDecomposer(args.planner)
+    try:
+        subtask_list = decomposer.decompose(prompt)
+    except _task_decomposer.DecompositionError as exc:
+        if args.navigation_only:
+            logging.warning(
+                "Replay decomposition failed in navigation-only mode (%s); "
+                "using the original prompt as a single navigate subtask.",
+                exc,
+            )
+            return [_task_decomposer.Subtask(type="navigate", prompt=prompt)]
+        logging.error("Task decomposition failed: %s", exc)
+        return None
+
+    if args.navigation_only and not any(subtask.type == "navigate" for subtask in subtask_list):
+        logging.warning(
+            "Replay decomposition returned no navigate subtasks; "
+            "using the original prompt as a single navigate subtask."
+        )
+        return [_task_decomposer.Subtask(type="navigate", prompt=prompt)]
+
+    return subtask_list
+
+
+def _run_replay_manipulation_subtask(
+    environment,
+    agent: _policy_agent.PolicyAgent,
+    manipulation_planner,
+    *,
+    subtask_prompt: str,
+    max_steps: int,
+    replan_interval_steps: int,
+) -> dict[str, object]:
+    prompt_history: list[dict[str, object]] = []
+    current_policy_prompt = subtask_prompt
+    prompt_queries = 0
+
+    def _replan(policy_steps: int) -> bool:
+        nonlocal current_policy_prompt
+        nonlocal prompt_queries
+        try:
+            decision = manipulation_planner.plan(
+                task_prompt=subtask_prompt,
+                current_policy_prompt=current_policy_prompt,
+                executed_policy_steps=policy_steps,
+                prompt_history=prompt_history,
+            )
+            prompt_queries += 1
+        except Exception as exc:  # noqa: BLE001
+            environment.set_prompt(current_policy_prompt)
+            agent.reset()
+            prompt_history.append(
+                {
+                    "policy_steps": policy_steps,
+                    "prompt": current_policy_prompt,
+                    "reason": f"replan_failed: {exc}",
+                }
+            )
+            logging.error(
+                "Replay manipulate replanner failed after %d policy steps; reusing current prompt: %s",
+                policy_steps,
+                exc,
+            )
+            return True
+
+        if decision.action == "complete":
+            logging.info(
+                "Replay manipulate replanner marked subtask complete after %d policy steps: %s",
+                policy_steps,
+                decision.reason,
+            )
+            return False
+
+        current_policy_prompt = decision.prompt
+        prompt_history.append(
+            {
+                "policy_steps": policy_steps,
+                "prompt": decision.prompt,
+                "reason": decision.reason,
+            }
+        )
+        environment.set_prompt(decision.prompt)
+        agent.reset()
+        logging.info(
+            "Replay manipulate replanner prompt update after %d policy steps: %s",
+            policy_steps,
+            decision.prompt,
+        )
+        return True
+
+    if not _replan(0):
+        return {
+            "executed_steps": 0,
+            "prompt_queries": prompt_queries,
+            "completed_by_replan": True,
+            "last_policy_prompt": current_policy_prompt,
+        }
+
+    executed_steps = 0
+    while executed_steps < max_steps and not environment.is_episode_complete():
+        observation = environment.get_observation()
+        action = agent.get_action(observation)
+        environment.apply_action(action)
+        executed_steps += 1
+
+        if (
+            executed_steps < max_steps
+            and not environment.is_episode_complete()
+            and executed_steps % replan_interval_steps == 0
+            and not _replan(executed_steps)
+        ):
+            return {
+                "executed_steps": executed_steps,
+                "prompt_queries": prompt_queries,
+                "completed_by_replan": True,
+                "last_policy_prompt": current_policy_prompt,
+            }
+
+    if executed_steps >= max_steps and not environment.is_episode_complete():
+        logging.info("Replay manipulate subtask hit fixed cap at %d policy steps.", max_steps)
+    elif environment.is_episode_complete():
+        logging.info("Replay manipulate subtask stopped because the replay dataset is exhausted.")
+
+    return {
+        "executed_steps": executed_steps,
+        "prompt_queries": prompt_queries,
+        "completed_by_replan": False,
+        "last_policy_prompt": current_policy_prompt,
+    }
+
+
+def _log_hybrid_replay_summary(
+    environment,
+    *,
+    total_subtasks: int,
+    navigate_subtasks: int,
+    manipulate_subtasks: int,
+    policy_steps: int,
+    prompt_queries: int,
+) -> None:
+    logging.info(
+        "Hybrid replay completed: subtasks=%d, navigate=%d, manipulate=%d, "
+        "policy_steps=%d, prompt_queries=%d, replay_cursor=%d/%d",
+        total_subtasks,
+        navigate_subtasks,
+        manipulate_subtasks,
+        policy_steps,
+        prompt_queries,
+        environment.get_cursor(),
+        environment.num_steps,
+    )
+    if policy_steps > 0:
+        _log_replay_summary(environment, policy_steps)
 
 
 def _run_replay_inference(args: Args, prompt: str) -> None:
@@ -170,7 +347,6 @@ def _run_replay_inference(args: Args, prompt: str) -> None:
 def _run_replay_planner(args: Args, prompt: str) -> None:
     from examples.piper_real import replay_env as _replay_env
     from examples.piper_real import replay_planner as _replay_planner
-    from examples.piper_real import task_decomposer as _task_decomposer
 
     if args.num_episodes != 1:
         logging.error("--replay-dataset with --use-llm-planner currently supports only --num-episodes=1.")
@@ -200,28 +376,10 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
             "Replay planner mode evaluates navigate subtasks only; manipulate subtasks will be skipped."
         )
 
-    decomposer = _task_decomposer.TaskDecomposer(args.planner)
-    try:
-        subtask_list = decomposer.decompose(prompt)
-    except _task_decomposer.DecompositionError as exc:
-        if args.navigation_only:
-            logging.warning(
-                "Replay decomposition failed in navigation-only mode (%s); "
-                "using the original prompt as a single navigate subtask.",
-                exc,
-            )
-            subtask_list = [_task_decomposer.Subtask(type="navigate", prompt=prompt)]
-        else:
-            logging.error("Task decomposition failed: %s", exc)
-            environment.close()
-            return
-
-    if args.navigation_only and not any(subtask.type == "navigate" for subtask in subtask_list):
-        logging.warning(
-            "Replay decomposition returned no navigate subtasks; "
-            "using the original prompt as a single navigate subtask."
-        )
-        subtask_list = [_task_decomposer.Subtask(type="navigate", prompt=prompt)]
+    subtask_list = _build_replay_subtask_list(args, prompt)
+    if subtask_list is None:
+        environment.close()
+        return
 
     planner = _replay_planner.OfflineReplayNavigationPlanner(environment, args.planner)
     try:
@@ -260,20 +418,162 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
         environment.close()
 
 
+def _run_replay_hybrid(args: Args, prompt: str) -> None:
+    from examples.piper_real import replay_env as _replay_env
+    from examples.piper_real import replay_manipulation_planner as _replay_manipulation_planner
+    from examples.piper_real import replay_planner as _replay_planner
+
+    if args.num_episodes != 1:
+        logging.error("--replay-dataset with --replay-mode=hybrid currently supports only --num-episodes=1.")
+        return
+
+    if not prompt:
+        logging.error("--replay-mode=hybrid with --replay-dataset requires a non-empty --prompt.")
+        return
+
+    if args.replay_manipulate_max_steps <= 0:
+        logging.error("--replay-manipulate-max-steps must be positive in hybrid replay mode.")
+        return
+
+    if args.replay_manipulate_replan_interval_steps <= 0:
+        logging.error("--replay-manipulate-replan-interval-steps must be positive in hybrid replay mode.")
+        return
+
+    if args.save_log:
+        logging.info("--save-log is ignored in replay hybrid mode.")
+
+    args.planner.validate_service_config()
+    args.planner.validate_motion_limits()
+    if not _run_required_server_checks(args, needs_pi0=not args.navigation_only, needs_planner=True):
+        return
+
+    logging.info("Replay hybrid mode: loading %s", args.replay_dataset)
+    environment = _replay_env.ReplayEnvironment(
+        dataset_path=args.replay_dataset,
+        prompt=prompt,
+        max_steps=args.max_episode_steps if args.max_episode_steps > 0 else None,
+    )
+
+    subtask_list = _build_replay_subtask_list(args, prompt)
+    if subtask_list is None:
+        environment.close()
+        return
+
+    planner = _replay_planner.OfflineReplayNavigationPlanner(environment, args.planner)
+    policy_agent = None if args.navigation_only else _create_policy_agent(args)
+    manipulation_planner = (
+        None
+        if args.navigation_only
+        else _replay_manipulation_planner.ReplayManipulationPromptPlanner(environment, args.planner)
+    )
+    completed_navigate = 0
+    completed_manipulate = 0
+    policy_steps = 0
+    prompt_queries = 0
+
+    try:
+        for idx, subtask in enumerate(subtask_list):
+            logging.info(
+                "Executing replay subtask %d/%d [%s]: %s",
+                idx + 1,
+                len(subtask_list),
+                subtask.type,
+                subtask.prompt,
+            )
+
+            if subtask.type == "navigate":
+                if not planner.run(task_prompt=subtask.prompt):
+                    logging.error(
+                        "Replay navigation failed at subtask %d/%d; aborting.",
+                        idx + 1,
+                        len(subtask_list),
+                    )
+                    return
+                completed_navigate += 1
+                logging.info(
+                    "Replay navigate subtask %d/%d succeeded at replay step %d/%d.",
+                    idx + 1,
+                    len(subtask_list),
+                    environment.get_cursor(),
+                    environment.num_steps,
+                )
+                continue
+
+            if args.navigation_only:
+                logging.info("Manipulate (skipped): %s", subtask.prompt)
+                continue
+
+            assert policy_agent is not None, "hybrid manipulate subtask requires a policy agent"
+            assert manipulation_planner is not None, "hybrid manipulate subtask requires a prompt replanner"
+            manipulation_result = _run_replay_manipulation_subtask(
+                environment,
+                policy_agent,
+                manipulation_planner,
+                subtask_prompt=subtask.prompt,
+                max_steps=args.replay_manipulate_max_steps,
+                replan_interval_steps=args.replay_manipulate_replan_interval_steps,
+            )
+            executed_steps = int(manipulation_result["executed_steps"])
+            completed_manipulate += 1
+            policy_steps += executed_steps
+            prompt_queries += int(manipulation_result["prompt_queries"])
+            logging.info(
+                "Replay manipulate subtask %d/%d completed after %d policy steps, "
+                "%d prompt queries, at replay cursor %d/%d.",
+                idx + 1,
+                len(subtask_list),
+                executed_steps,
+                int(manipulation_result["prompt_queries"]),
+                environment.get_cursor(),
+                environment.num_steps,
+            )
+            if environment.is_episode_complete() and idx + 1 < len(subtask_list):
+                logging.error(
+                    "Replay dataset exhausted after subtask %d/%d; aborting remaining subtasks.",
+                    idx + 1,
+                    len(subtask_list),
+                )
+                return
+
+        _log_hybrid_replay_summary(
+            environment,
+            total_subtasks=len(subtask_list),
+            navigate_subtasks=completed_navigate,
+            manipulate_subtasks=completed_manipulate,
+            policy_steps=policy_steps,
+            prompt_queries=prompt_queries,
+        )
+    finally:
+        environment.close()
+
+
 def main(args: Args) -> None:
     prompt = args.prompt.strip()
 
     if args.replay_dataset:
+        try:
+            replay_mode = _resolve_replay_mode(args)
+        except ValueError as exc:
+            logging.error("%s", exc)
+            return
+
         if args.use_robot_base:
             logging.error("--use-robot-base and --replay-dataset are mutually exclusive.")
             return
 
-        if args.use_llm_planner:
+        if replay_mode == "planner":
             _run_replay_planner(args, prompt)
             return
 
+        if replay_mode == "hybrid":
+            _run_replay_hybrid(args, prompt)
+            return
+
         if args.navigation_only:
-            logging.error("--navigation-only requires --use-llm-planner.")
+            logging.error(
+                "--navigation-only requires replay planner mode "
+                "(--replay-mode planner|hybrid or legacy --use-llm-planner)."
+            )
             return
 
         _run_replay_inference(args, prompt)

@@ -50,8 +50,10 @@ class OfflineReplayNavigationPlanner(LLMNavigationPlanner):
 
     def __init__(self, replay_environment: ReplayEnvironment, config: PlannerConfig) -> None:
         self.replay_environment = replay_environment
-        self._replay_step = 0
-        self._replay_exhausted = replay_environment.num_steps == 0
+        self._replay_step = replay_environment.get_cursor()
+        self._replay_exhausted = (
+            replay_environment.num_steps == 0 or self._replay_step >= replay_environment.num_steps
+        )
         ros_operator = _ReplayRosOperator()
         super().__init__(ros_operator=ros_operator, config=config)
         if not self._replay_exhausted:
@@ -66,6 +68,10 @@ class OfflineReplayNavigationPlanner(LLMNavigationPlanner):
         return list(self.ros_operator.published_commands)
 
     def run(self, task_prompt: str) -> bool:
+        current_cursor = self.replay_environment.get_cursor()
+        if current_cursor >= self.replay_environment.num_steps:
+            self._mark_replay_exhausted()
+
         if self._replay_exhausted:
             self._log_status(
                 "navigation_failed",
@@ -77,8 +83,12 @@ class OfflineReplayNavigationPlanner(LLMNavigationPlanner):
             )
             return False
 
-        if not self.ros_operator.img_front_deque or not self.ros_operator.robot_base_deque:
-            self._load_replay_step(self._replay_step)
+        if (
+            current_cursor != self._replay_step
+            or not self.ros_operator.img_front_deque
+            or not self.ros_operator.robot_base_deque
+        ):
+            self._load_replay_step(current_cursor)
 
         return super().run(task_prompt)
 
@@ -132,6 +142,7 @@ class OfflineReplayNavigationPlanner(LLMNavigationPlanner):
     def _load_replay_step(self, step_idx: int) -> None:
         self._replay_step = step_idx
         self._replay_exhausted = False
+        self.replay_environment.set_cursor(step_idx)
         self.ros_operator.img_front_deque.clear()
         self.ros_operator.robot_base_deque.clear()
         self.ros_operator.img_front_deque.append(self.replay_environment.get_front_image(step_idx))
@@ -141,5 +152,6 @@ class OfflineReplayNavigationPlanner(LLMNavigationPlanner):
 
     def _mark_replay_exhausted(self) -> None:
         self._replay_exhausted = True
+        self.replay_environment.set_cursor(self.replay_environment.num_steps)
         self.ros_operator.img_front_deque.clear()
         self.ros_operator.robot_base_deque.clear()

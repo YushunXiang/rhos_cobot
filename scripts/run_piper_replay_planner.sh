@@ -330,6 +330,7 @@ cmd=(
   "$PYTHON_CMD" -m examples.piper_real.main
   --prompt "$PROMPT"
   --replay-dataset "$DATASET"
+  --replay-mode planner
   --use-llm-planner
   --max-episode-steps "$MAX_EPISODE_STEPS"
   --planner.base-url "$PLANNER_BASE_URL"

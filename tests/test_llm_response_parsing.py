@@ -101,3 +101,46 @@ def test_replay_navigation_only_falls_back_to_single_navigate_subtask(monkeypatc
 
     assert recorded["planner_prompts"] == [prompt]
     assert recorded["closed"] is True
+
+
+def test_replay_manipulation_planner_accepts_reasoning_only_responses(monkeypatch):
+    from examples.piper_real.planner_config import PlannerConfig
+    from examples.piper_real.replay_manipulation_planner import ReplayManipulationPromptPlanner
+
+    class FakeReplayEnvironment:
+        num_steps = 2
+        camera_names = ("cam_high",)
+
+        def get_cursor(self) -> int:
+            return 0
+
+        def get_image(self, _cam_name: str, _idx: int):
+            import numpy as np
+
+            return np.zeros((8, 8, 3), dtype=np.uint8)
+
+    replanner = ReplayManipulationPromptPlanner(
+        FakeReplayEnvironment(),
+        PlannerConfig(base_url="http://unused", model="test"),
+    )
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    reasoning='{"action":"continue","prompt":"grasp the plate rim","reason":"object aligned"}',
+                )
+            )
+        ]
+    )
+    monkeypatch.setattr(replanner.client.chat.completions, "create", lambda **_kwargs: response)
+
+    decision = replanner.plan(
+        task_prompt="pick up the plate",
+        current_policy_prompt="pick up the plate",
+        executed_policy_steps=0,
+        prompt_history=[],
+    )
+
+    assert decision.action == "continue"
+    assert decision.prompt == "grasp the plate rim"

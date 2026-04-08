@@ -44,6 +44,7 @@ class ReplayEnvironment(_environment.Environment):
         self._render_height = render_height
         self._render_width = render_width
         self._cursor: int = 0
+        self._last_observation_idx: int | None = None
         self._dataset_path = dataset_path
 
         # Keep the HDF5 file open and decode frames lazily. Long-horizon
@@ -75,6 +76,7 @@ class ReplayEnvironment(_environment.Environment):
         self._estimated_odometry = self._build_estimated_odometry()
 
         self.predicted_actions: list[np.ndarray] = []
+        self.predicted_action_steps: list[int] = []
 
         logging.info(
             "ReplayEnvironment loaded %s (%d steps, cameras: %s, compressed=%s)",
@@ -97,8 +99,24 @@ class ReplayEnvironment(_environment.Environment):
         return self._front_camera_name
 
     @property
+    def camera_names(self) -> tuple[str, ...]:
+        return tuple(self._image_datasets.keys())
+
+    @property
     def recorded_base_actions(self) -> Optional[np.ndarray]:
         return self._recorded_base_actions
+
+    def set_prompt(self, prompt: str) -> None:
+        self._prompt = prompt
+
+    def get_cursor(self) -> int:
+        return self._cursor
+
+    def set_cursor(self, step_idx: int) -> None:
+        if step_idx < 0 or step_idx > self._num_steps:
+            raise IndexError(f"Replay cursor {step_idx} is out of range for {self._num_steps} steps")
+        self._cursor = step_idx
+        self._last_observation_idx = None
 
     def close(self) -> None:
         if getattr(self, "_dataset", None) is not None:
@@ -175,7 +193,9 @@ class ReplayEnvironment(_environment.Environment):
     @override
     def reset(self) -> None:
         self._cursor = 0
+        self._last_observation_idx = None
         self.predicted_actions = []
+        self.predicted_action_steps = []
 
     @override
     def is_episode_complete(self) -> bool:
@@ -198,6 +218,7 @@ class ReplayEnvironment(_environment.Environment):
             )
             images[cam_name] = einops.rearrange(img, "h w c -> c h w")
 
+        self._last_observation_idx = idx
         self._cursor += 1
 
         return {
@@ -210,7 +231,11 @@ class ReplayEnvironment(_environment.Environment):
     def apply_action(self, action: dict) -> None:
         if "actions" in action:
             self.predicted_actions.append(np.array(action["actions"]))
-            step_idx = len(self.predicted_actions) - 1
+            step_idx = self._last_observation_idx
+            if step_idx is None:
+                step_idx = max(self._cursor - 1, 0)
+            self.predicted_action_steps.append(step_idx)
+            self._last_observation_idx = None
             logging.info(
                 "Replay step %d — predicted action: %s",
                 step_idx,

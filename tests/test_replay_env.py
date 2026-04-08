@@ -93,6 +93,32 @@ class TestReplayEnvironment:
         env.get_observation()
         assert env._cursor == 1
 
+    def test_set_prompt_updates_future_observations(self, tmp_path):
+        hdf5_path = str(tmp_path / "episode_0.hdf5")
+        _create_test_hdf5(hdf5_path, num_steps=5)
+        from examples.piper_real.replay_env import ReplayEnvironment
+
+        env = ReplayEnvironment(dataset_path=hdf5_path, prompt="test task")
+        env.reset()
+        env.set_prompt("updated task")
+
+        obs = env.get_observation()
+
+        assert obs["prompt"] == "updated task"
+
+    def test_set_cursor_repositions_replay(self, tmp_path):
+        hdf5_path = str(tmp_path / "episode_0.hdf5")
+        _create_test_hdf5(hdf5_path, num_steps=5)
+        from examples.piper_real.replay_env import ReplayEnvironment
+
+        env = ReplayEnvironment(dataset_path=hdf5_path, prompt="test task")
+        env.reset()
+        env.set_cursor(3)
+
+        assert env.get_cursor() == 3
+        obs = env.get_observation()
+        assert np.allclose(obs["state"], env._qpos[3])
+
     def test_is_episode_complete_at_end(self, tmp_path):
         hdf5_path = str(tmp_path / "episode_0.hdf5")
         _create_test_hdf5(hdf5_path, num_steps=2)
@@ -115,6 +141,19 @@ class TestReplayEnvironment:
         fake_action = {"actions": np.zeros(14)}
         env.apply_action(fake_action)
         assert len(env.predicted_actions) == 1
+
+    def test_apply_action_tracks_observation_step(self, tmp_path):
+        hdf5_path = str(tmp_path / "episode_0.hdf5")
+        _create_test_hdf5(hdf5_path, num_steps=5)
+        from examples.piper_real.replay_env import ReplayEnvironment
+
+        env = ReplayEnvironment(dataset_path=hdf5_path, prompt="test task")
+        env.reset()
+        env.set_cursor(2)
+        env.get_observation()
+        env.apply_action({"actions": np.zeros(14)})
+
+        assert env.predicted_action_steps == [2]
 
     def test_ground_truth_actions_accessible(self, tmp_path):
         hdf5_path = str(tmp_path / "episode_0.hdf5")
@@ -246,6 +285,35 @@ class TestOfflineReplayNavigationPlanner:
 
         assert planner.run("move until replay ends") is False
         assert planner.current_step == 1
+        assert env.get_cursor() == env.num_steps
+
+    def test_planner_syncs_to_environment_cursor_before_run(self, tmp_path, monkeypatch):
+        hdf5_path = str(tmp_path / "episode_0.hdf5")
+        _create_test_hdf5(hdf5_path, num_steps=5, fps=2.0)
+
+        from examples.piper_real.planner_config import PlannerConfig
+        from examples.piper_real.replay_env import ReplayEnvironment
+        from examples.piper_real.replay_planner import OfflineReplayNavigationPlanner
+
+        env = ReplayEnvironment(dataset_path=hdf5_path, prompt="test task")
+        planner = OfflineReplayNavigationPlanner(env, PlannerConfig(base_url="http://unused", model="test"))
+        env.set_cursor(3)
+        responses = iter(
+            [
+                (
+                    '{"action":"stop","reason":"aligned"}',
+                    {
+                        "action": "stop",
+                        "reason": "aligned",
+                    },
+                ),
+            ]
+        )
+        monkeypatch.setattr(planner, "query_llm", lambda *_args, **_kwargs: next(responses))
+
+        assert planner.run("resume from current cursor") is True
+        assert planner.current_step == 3
+        assert env.get_cursor() == 3
 
 
 class TestMainReplayIntegration:
@@ -287,3 +355,184 @@ class TestMainReplayIntegration:
             "dataset": "/tmp/fake_episode.hdf5",
             "prompt": "navigate to the table",
         }
+
+    def test_main_routes_replay_hybrid_to_new_branch(self, monkeypatch):
+        from examples.piper_real import main as main_module
+
+        observed: dict[str, str] = {}
+
+        def fake_replay_hybrid(args, prompt):
+            observed["dataset"] = args.replay_dataset
+            observed["prompt"] = prompt
+
+        monkeypatch.setattr(main_module, "_run_replay_hybrid", fake_replay_hybrid)
+
+        main_module.main(
+            main_module.Args(
+                replay_dataset="/tmp/fake_episode.hdf5",
+                replay_mode="hybrid",
+                prompt="pick up the red cup",
+            )
+        )
+
+        assert observed == {
+            "dataset": "/tmp/fake_episode.hdf5",
+            "prompt": "pick up the red cup",
+        }
+
+    def test_run_replay_hybrid_shares_cursor_between_subtasks(self, monkeypatch):
+        from examples.piper_real import main as main_module
+        from examples.piper_real import replay_env as replay_env_mod
+        from examples.piper_real import replay_manipulation_planner as replay_manipulation_planner_mod
+        from examples.piper_real import replay_planner as replay_planner_mod
+        from examples.piper_real import task_decomposer as task_decomposer_mod
+        from examples.piper_real.planner_config import PlannerConfig
+
+        recorded: dict[str, object] = {}
+
+        class FakeReplayEnvironment:
+            def __init__(self, dataset_path: str, prompt: str, max_steps: int | None = None) -> None:
+                recorded["dataset_path"] = dataset_path
+                recorded["prompt"] = prompt
+                recorded["max_steps"] = max_steps
+                recorded["closed"] = False
+                self._cursor = 0
+                self.num_steps = 10
+                self.front_camera_name = "cam_high"
+                self.camera_names = ("cam_high",)
+                self.predicted_actions: list[np.ndarray] = []
+                self.predicted_action_steps: list[int] = []
+                self.ground_truth_actions = np.zeros((self.num_steps, 14), dtype=np.float32)
+                self.ground_truth_base_actions = None
+
+            def reset(self) -> None:
+                self._cursor = 0
+                self.predicted_actions = []
+                self.predicted_action_steps = []
+
+            def close(self) -> None:
+                recorded["closed"] = True
+
+            def set_prompt(self, prompt: str) -> None:
+                recorded.setdefault("manipulate_prompts", []).append(prompt)
+
+            def get_cursor(self) -> int:
+                return self._cursor
+
+            def set_cursor(self, step_idx: int) -> None:
+                self._cursor = step_idx
+
+            def is_episode_complete(self) -> bool:
+                return self._cursor >= self.num_steps
+
+            def get_observation(self) -> dict:
+                idx = self._cursor
+                if idx >= self.num_steps:
+                    raise IndexError("Replay exhausted")
+                self._cursor += 1
+                return {
+                    "state": np.zeros(14, dtype=np.float32),
+                    "images": {},
+                    "prompt": "unused",
+                    "step": idx,
+                }
+
+            def apply_action(self, action: dict) -> None:
+                self.predicted_actions.append(np.asarray(action["actions"]))
+                self.predicted_action_steps.append(self._cursor - 1)
+
+        class FakeTaskDecomposer:
+            def __init__(self, _config) -> None:
+                pass
+
+            def decompose(self, _prompt: str):
+                return [
+                    task_decomposer_mod.Subtask(type="navigate", prompt="nav to sink"),
+                    task_decomposer_mod.Subtask(type="manipulate", prompt="pick plate"),
+                    task_decomposer_mod.Subtask(type="navigate", prompt="nav to table"),
+                ]
+
+        class FakeOfflineReplayNavigationPlanner:
+            def __init__(self, environment, _config) -> None:
+                self.environment = environment
+                self.current_step = environment.get_cursor()
+
+            def run(self, task_prompt: str) -> bool:
+                recorded.setdefault("navigate_starts", []).append((task_prompt, self.environment.get_cursor()))
+                self.environment.set_cursor(self.environment.get_cursor() + 2)
+                self.current_step = self.environment.get_cursor()
+                return True
+
+        class FakePolicyAgent:
+            def reset(self) -> None:
+                recorded["policy_resets"] = int(recorded.get("policy_resets", 0)) + 1
+
+            def get_action(self, observation: dict) -> dict:
+                recorded.setdefault("policy_obs_steps", []).append(observation["step"])
+                return {"actions": np.zeros(14, dtype=np.float32)}
+
+        class FakeManipulationPromptPlanner:
+            def __init__(self, _environment, _config) -> None:
+                pass
+
+            def plan(
+                self,
+                *,
+                task_prompt: str,
+                current_policy_prompt: str,
+                executed_policy_steps: int,
+                prompt_history,
+            ):
+                recorded.setdefault("replan_calls", []).append(
+                    {
+                        "task_prompt": task_prompt,
+                        "current_policy_prompt": current_policy_prompt,
+                        "executed_policy_steps": executed_policy_steps,
+                        "history_len": len(prompt_history),
+                    }
+                )
+                if executed_policy_steps == 0:
+                    return replay_manipulation_planner_mod.ManipulationReplanDecision(
+                        action="continue",
+                        prompt="grasp the plate rim",
+                        reason="stage aligned",
+                    )
+                return replay_manipulation_planner_mod.ManipulationReplanDecision(
+                    action="complete",
+                    reason="plate is secured",
+                )
+
+        monkeypatch.setattr(replay_env_mod, "ReplayEnvironment", FakeReplayEnvironment)
+        monkeypatch.setattr(task_decomposer_mod, "TaskDecomposer", FakeTaskDecomposer)
+        monkeypatch.setattr(
+            replay_planner_mod,
+            "OfflineReplayNavigationPlanner",
+            FakeOfflineReplayNavigationPlanner,
+        )
+        monkeypatch.setattr(
+            replay_manipulation_planner_mod,
+            "ReplayManipulationPromptPlanner",
+            FakeManipulationPromptPlanner,
+        )
+        monkeypatch.setattr(main_module, "_create_policy_agent", lambda _args: FakePolicyAgent())
+
+        args = main_module.Args(
+            replay_dataset="/tmp/episode_4.hdf5",
+            replay_mode="hybrid",
+            replay_manipulate_max_steps=4,
+            replay_manipulate_replan_interval_steps=2,
+            skip_server_checks=True,
+            prompt="long-horizon replay mock validation",
+            planner=PlannerConfig(base_url="http://unused", model="test"),
+        )
+
+        main_module._run_replay_hybrid(args, args.prompt)
+
+        assert recorded["navigate_starts"] == [
+            ("nav to sink", 0),
+            ("nav to table", 4),
+        ]
+        assert recorded["manipulate_prompts"] == ["grasp the plate rim"]
+        assert recorded["policy_obs_steps"] == [2, 3]
+        assert [call["executed_policy_steps"] for call in recorded["replan_calls"]] == [0, 2]
+        assert recorded["closed"] is True
