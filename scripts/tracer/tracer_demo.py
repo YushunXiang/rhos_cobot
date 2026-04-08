@@ -34,28 +34,24 @@ if __name__ == '__main__':
 
         #  执行动作序列
         
+
+        move_base(pub, linear_x=-0.2, duration=1.0) # 后退
+        rospy.sleep(1.0)                          
+        move_base(pub, angular_z=0.2, duration=9.0) # 原地左转
+        rospy.sleep(1.0) 
+        move_base(pub, linear_x=0.2, duration=1.5)  # 前进，这个还可以大一点点
+        rospy.sleep(1.0) 
+        move_base(pub, angular_z=-0.2, duration=9.0) # 原地右转
+        rospy.sleep(1.0) 
+        move_base(pub, linear_x=0.1, duration=2.0) # 前进
+        rospy.sleep(1.0) 
+
         #move_base(pub, linear_x=0.2, duration=2.0)  # 前进
         #rospy.sleep(0.5)                            # 动作之间停顿一下，保护电机
-        move_base(pub, angular_z=0.2, duration=10.0) 
-        rospy.sleep(1.0)
-        move_base(pub, linear_x=0.1, duration=2.0)  # 前进
-        rospy.sleep(1.0)
-        move_base(pub, angular_z=-0.2, duration=10.0)
-                
+        # move_base(pub, angular_z=0.2, duration=10.0) 
+        # rospy.sleep(1.0)
+        # move_base(pub, linear_x=0.1, duration=2.0)  # 前进
 
-
-        # move_base(pub, linear_x=-0.2, duration=0.5)
-        # rospy.sleep(1.0)
-
-        # move_base(pub, angular_z=-0.5, duration=3.5)
-        # rospy.sleep(1.0)
-        # move_base(pub, linear_x=0.2, duration=1.5)
-        # rospy.sleep(1.0)
-        # move_base(pub, angular_z=-0.5, duration=3.5)
-        # rospy.sleep(1.0)
-        # move_base(pub, linear_x=0.2, duration=0.5)
-        # rospy.sleep(1.0)
-        
         #move_base(pub, angular_z=0.5, duration=2.0) # 原地左转
         #rospy.sleep(0.5)
         
