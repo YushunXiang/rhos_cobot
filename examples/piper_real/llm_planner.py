@@ -9,7 +9,7 @@ import cv2
 from openai import OpenAI
 
 from examples.piper_real import base_safety
-from examples.piper_real.llm_utils import extract_json_text
+from examples.piper_real.llm_utils import extract_message_json_text
 from examples.piper_real.planner_config import PlannerConfig
 
 
@@ -89,17 +89,8 @@ class LLMNavigationPlanner:
                 },
             ],
         )
-        content = response.choices[0].message.content
-        if isinstance(content, list):
-            raw_text = "".join(
-                part.get("text", "") if isinstance(part, dict) else getattr(part, "text", "")
-                for part in content
-            )
-        else:
-            raw_text = str(content)
-        raw_text = raw_text.strip()
         try:
-            raw_json = extract_json_text(raw_text)
+            raw_text, raw_json = extract_message_json_text(response.choices[0].message)
         except ValueError as exc:
             raise PlannerResponseError(str(exc)) from exc
         payload = json.loads(raw_json)
@@ -283,4 +274,3 @@ class LLMNavigationPlanner:
             logging.info("Navigation status: %s", json.dumps(payload, ensure_ascii=False))
         else:
             logging.warning("Navigation status: %s", json.dumps(payload, ensure_ascii=False))
-

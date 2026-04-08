@@ -1,0 +1,39 @@
+{
+  "turn_on_tap": {
+    "prompt": "Turn on the water tap."
+  },
+  "turn_on_off_tap": {
+    "prompt": "Turn on the water tap and then turn it off."
+  },
+  "turn_off_tap": {
+    "prompt": "Turn off the water tap."
+  },
+  "pick_bread_leaf_1": {
+    "prompt": "Place the first slice of bread on the plate."
+  },
+  "pick_bread_leaf_2": {
+    "prompt": "Start assembling a sandwich by placing bread and lettuce on the plate.",
+    "stages": {
+      "0": {
+        "prompt": "Place the first slice of bread on the plate."
+      },
+      "1": {
+        "prompt": "Place the lettuce leaf on the first slice of bread."
+      }
+    }
+  },
+  "pick_bread_leaf_3": {
+    "prompt": "Assemble a sandwich on the plate using two slices of bread and a lettuce leaf.",
+    "stages": {
+      "0": {
+        "prompt": "Place the first slice of bread on the plate."
+      },
+      "1": {
+        "prompt": "Place the lettuce leaf on the first slice of bread."
+      },
+      "2": {
+        "prompt": "Place the second slice of bread on the lettuce leaf."
+      }
+    }
+  }
+}
