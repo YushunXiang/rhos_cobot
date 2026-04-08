@@ -315,42 +315,51 @@ python -m examples.piper_real.main \
 ### 两层架构
 
 1. **TaskDecomposer**: 一次性 LLM 调用，将 prompt 拆解为 subtask 列表。
-2. **LLMNavigationPlanner**: 执行单个 navigate subtask 的多步导航循环。
+2. **navigation_tool + Runtime**:
+   - `navigate` subtask 调用 `examples/piper_real/navigation_tool.py`
+   - `manipulate` subtask 继续走现有 OpenPI Runtime
 
 ### 执行流程
 
-1. LLM 拆解 prompt 为 `[{type: "navigate"|"manipulate", prompt: "..."}]`。
+1. LLM 拆解 prompt 为 `{"subtasks": [{"type": "navigate"|"manipulate", "prompt": "..."}]}`。
 2. 如果 `--use-robot-base` 且有 navigate subtask，要求操作员输入 `yes` 确认。
 3. 按序执行每个 subtask：
-   - **navigate**: `--use-robot-base` 时实际移动底盘；否则仅打印。
+   - **navigate**: 调用共享 navigation tool；`--use-robot-base` 时实际移动底盘，否则 dry-run。
    - **manipulate**: `--navigation-only` 时跳过；否则启动策略推理。
 4. navigate 失败时终止整个任务，不执行后续 subtask。
 5. 每个 manipulate subtask 独立运行一次策略推理。
 
 ### Planner 配置参数
 
-导航相关配置通过 `--planner.*` 传入（与之前相同）：
+任务拆解服务通过 `--planner.*` 传入：
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--planner.base-url` | `http://192.168.3.123:8000/v1` | planner 服务地址 |
 | `--planner.model` | `Qwen/Qwen3.5-4B` | 模型名称 |
 | `--planner.api-key` | `EMPTY` | API 密钥 |
-| `--planner.max-nav-steps` | `20` | 最大有效导航步数 |
-| `--planner.max-linear-vel` | `0.3` | 底盘线速度上限 (m/s) |
-| `--planner.max-angular-vel` | `0.5` | 底盘角速度上限 (rad/s) |
-| `--planner.default-duration` | `1.5` | 单步默认执行时长 (s) |
+
+Planner 返回 JSON only，例如：
+
+```json
+{
+  "subtasks": [
+    {"type": "navigate", "prompt": "move to the table"},
+    {"type": "manipulate", "prompt": "pick up the red cup"}
+  ]
+}
+```
 
 ### 安全机制
 
-- 超速或非法 planner 指令会被拒绝并要求 planner 重新决策。
-- planner 连续失败 3 次后重试，第 4 次失败终止导航。
+- navigate subtask 开始前只做一次人工安全确认。
+- navigation tool 的每个固定步骤执行后都会补发零速度到底盘。
 - 导航失败时终止整个任务，手臂操作不会启动。
-- 运行退出时会补发一次零速度到底盘。
+- 运行退出时会再补发一次零速度到底盘。
 
 ## 6. 操作阶段底盘行为
 
-操作（manipulate）阶段策略输出固定为 14 维（仅手臂关节），不包含底盘控制。底盘移动仅在 navigate subtask 中由 LLMNavigationPlanner 执行。
+操作（manipulate）阶段策略输出固定为 14 维（仅手臂关节），不包含底盘控制。底盘移动只发生在 navigate subtask 中，并由 `examples/piper_real/navigation_tool.py` 执行。
 
 如果策略模型输出超过 14 维，多余维度会被截断。
 
@@ -372,7 +381,7 @@ candump can0
 - 存在 navigate subtask 且启用 `--use-robot-base` 时，导航阶段先于手臂操作；每轮移动后有零速度停车。
 - manipulate 阶段不发布 `/cmd_vel`；底盘移动只发生在 navigate subtask 中。
 - 仅手臂操作时，`/cmd_vel` 无任何发布。
-- planner 原始响应、拒绝/重试情况、执行速度和最终原因都能在日志中看到。
+- task decomposition、navigation tool 调用、固定动作步骤和最终结果都能在日志中看到。
 - 若动作缺少底盘维度、导航失败或未确认安全，`Runtime.run()` 不会继续或会在首次非法底盘动作处终止。
 
 ## 8. 离线回放调试（`--replay-dataset`）
