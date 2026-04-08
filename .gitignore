@@ -122,6 +122,7 @@ dmypy.json
 
 /.agents
 /.specify
+/.codex
 
 # Local deployment config
 config/servers.toml
