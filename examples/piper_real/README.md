@@ -2,12 +2,12 @@
 
 This example runs the real-robot deploy path for `examples/piper_real/main.py`.
 
-The flow is now navigation-first:
+The flow is now decomposition-first:
 
-1. Build `PiperRealEnvironment` and connect to the OpenPI policy server.
-2. If navigation is enabled and `--prompt` is non-empty, query a local OpenAI-compatible vision planner with the front camera image and odometry.
-3. Drive the TRACER base in short bounded cycles until the planner returns `stop`.
-4. Start OpenPI manipulation with the original prompt only after navigation succeeds, or immediately when navigation is explicitly disabled.
+1. Build `PiperRealEnvironment` and connect to the OpenPI policy server only when a manipulate subtask exists.
+2. If `--use-llm-planner` is enabled and `--prompt` is non-empty, send the full task prompt to the planner service and get back ordered `navigate` / `manipulate` subtasks.
+3. Execute each `navigate` subtask by calling `examples.piper_real.navigation_tool.navigate(...)`, which runs the fixed `default_demo` TRACER routine in v1.
+4. Execute each `manipulate` subtask with the existing OpenPI Runtime path.
 
 ## Safety
 
@@ -61,21 +61,22 @@ This connects to `web@192.168.3.123`, starts `vllm serve` inside a remote `tmux`
 
 Minimum requirements:
 
-- Accepts image + text chat-completions requests.
+- Accepts text chat-completions requests for task decomposition.
 - Returns JSON-only planner responses.
 - Is reachable from the robot workstation at the configured `--planner.base-url`.
 
-The planner must return one of these shapes:
+The planner must return this shape:
 
 ```json
-{"action": "move", "linear_x": 0.2, "angular_z": -0.1, "duration": 1.2, "reasoning": "Rotate slightly and move forward."}
+{
+  "subtasks": [
+    {"type": "navigate", "prompt": "move to the table"},
+    {"type": "manipulate", "prompt": "pick up the red cup"}
+  ]
+}
 ```
 
-```json
-{"action": "stop", "reason": "The robot is in a usable operating position."}
-```
-
-## Run Navigation First
+## Run Decomposition + Navigation Tool
 
 ```bash
 python -m examples.piper_real.main \
@@ -90,9 +91,9 @@ Runtime behavior:
 
 - A safety warning is shown before navigation starts.
 - The operator must type `yes` to allow base motion.
-- Planner cycles keep the base stopped while waiting for a decision.
-- Each accepted `move` command is executed with bounded velocities and followed by an immediate zero-velocity command.
-- Manipulation starts only after a planner `stop` decision.
+- Each navigate subtask invokes the shared navigation tool.
+- In v1, every navigate prompt runs the same fixed `default_demo` routine.
+- Manipulation starts only after the navigate subtask returns success.
 
 ## Skip Navigation
 
@@ -103,17 +104,17 @@ python -m examples.piper_real.main \
 
 This path skips chassis movement, reports `navigation skipped`, and starts manipulation directly.
 
-## Use Policy-Driven Base Motion
+## Dry-Run Navigation
 
 ```bash
 python -m examples.piper_real.main \
-  --use-robot-base \
-  --prompt "turn on the water tap." \
-  --planner.max-linear-vel 0.25 \
-  --planner.max-angular-vel 0.4
+  --use-llm-planner \
+  --prompt "移动到桌子旁边拿起红色杯子" \
+  --planner.base-url http://192.168.3.123:8000/v1 \
+  --planner.model Qwen/Qwen3.5-4B
 ```
 
-The runtime still asks for confirmation once before motion. If the policy emits missing, non-finite, or overspeed base commands, the base is stopped and the run aborts.
+This runs navigate subtasks through the same tool path but without publishing real base motion. Add `--use-robot-base` to execute the fixed routine on the robot.
 
 ## Validation
 
@@ -127,7 +128,7 @@ rostopic echo /odom_raw
 Confirm all of the following:
 
 - Navigation publishes `/cmd_vel` before arm manipulation starts.
-- The base returns to zero velocity between planner cycles and on shutdown.
-- Policy-driven base commands stay within the configured safety envelope.
-- Planner logs show each raw response, rejected or retried cycles, and the terminal reason.
+- The base returns to zero velocity between routine steps and on shutdown.
+- Task decomposition is logged before subtask execution starts.
+- Navigation tool logs show the prompt, selected routine, and each fixed step.
 - Navigation failure prevents `Runtime.run()` from starting.
