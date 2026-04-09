@@ -26,9 +26,14 @@ Wrapper options:
   --planner-replay    Delegate to offline VLM planner replay instead of pi0 policy replay
   --hybrid-replay     Run offline replay with VLM navigation + pi0 manipulation
   --policy-replay     Force pi0 policy replay
+  --mock-pi0          Start the built-in mock policy server instead of the real pi0 server.
+                     Sets MODE=none, starts examples.piper_real.mock_policy_server in the
+                     background, and waits for it to be ready. Useful when the real pi0
+                     server is unavailable.
   --kill-existing-replay
                      Stop any existing replay mock process before starting
                      default: enabled
+  --visualize         Show camera views and subtask overlay during replay
   --no-kill-existing-replay
                      Keep any existing replay mock process alive
   --replay-kill-grace-sec SECONDS
@@ -118,6 +123,8 @@ MODE_SET=0
 KILL_EXISTING_REPLAY="${KILL_EXISTING_REPLAY:-1}"
 REPLAY_KILL_GRACE_SEC="${REPLAY_KILL_GRACE_SEC:-5}"
 REPLAY_MODE="${REPLAY_MODE:-policy}"
+VISUALIZE=0
+MOCK_PI0=0
 MAIN_ARGS=()
 
 while [[ "$#" -gt 0 ]]; do
@@ -129,6 +136,10 @@ while [[ "$#" -gt 0 ]]; do
       fi
       MODE="$1"
       MODE_SET=1
+      shift
+      ;;
+    --mock-pi0)
+      MOCK_PI0=1
       shift
       ;;
     --kill-existing-replay)
@@ -145,6 +156,10 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --policy-replay)
       REPLAY_MODE="policy"
+      shift
+      ;;
+    --visualize)
+      VISUALIZE=1
       shift
       ;;
     --no-kill-existing-replay)
@@ -379,6 +394,7 @@ delegate_to_planner_replay() {
   export DATASET PROMPT MAX_EPISODE_STEPS PYTHON_CMD START_SERVERS OPENPI_ROOT OPENPI_CLIENT_SRC
   export TASK_NAME PROMPT_SOURCE
   export KILL_EXISTING_REPLAY REPLAY_KILL_GRACE_SEC
+  export VISUALIZE
   export START_TARGET="$planner_start_target"
 
   echo "REPLAY_MODE=planner detected; delegating to scripts/run_piper_replay_planner.sh"
@@ -481,6 +497,25 @@ fi
 cd "$SERVER_REPO_ROOT"
 stop_existing_replay_processes
 
+# --mock-pi0: launch the built-in mock policy server instead of the real pi0 server
+MOCK_PI0_PID=""
+if [[ "$MOCK_PI0" == "1" ]]; then
+  MODE="none"
+  START_SERVERS="0"
+  PI0_HOST="127.0.0.1"
+  echo "Starting mock policy server on ws://$PI0_HOST:$PI0_PORT ..."
+  "$PYTHON_CMD" -m examples.piper_real.mock_policy_server \
+    --host "$PI0_HOST" --port "$PI0_PORT" &
+  MOCK_PI0_PID="$!"
+  echo "Mock policy server PID: $MOCK_PI0_PID"
+
+  # Kill mock server when the script exits
+  trap 'if [[ -n "$MOCK_PI0_PID" ]] && kill -0 "$MOCK_PI0_PID" 2>/dev/null; then
+    echo "Stopping mock policy server (PID $MOCK_PI0_PID)."
+    kill "$MOCK_PI0_PID" 2>/dev/null || true
+  fi' EXIT
+fi
+
 EFFECTIVE_START_TARGET="$START_TARGET"
 if [[ "$REPLAY_MODE" == "hybrid" && "$START_SERVERS" == "1" && "$MODE" != "none" && "$EFFECTIVE_START_TARGET" == "pi0" ]]; then
   echo "REPLAY_MODE=hybrid requires planner + pi0; promoting START_TARGET=pi0 to all."
@@ -532,11 +567,15 @@ if [[ "$REPLAY_MODE" == "hybrid" ]]; then
   )
 fi
 
+if [[ "$VISUALIZE" == "1" ]]; then
+  cmd+=(--visualize)
+fi
+
 if [[ "${#MAIN_ARGS[@]}" -gt 0 ]]; then
   cmd+=("${MAIN_ARGS[@]}")
 fi
 
-echo "Mode: $MODE"
+echo "Mode: $MODE${MOCK_PI0:+  (mock pi0)}"
 echo "Replay mode: $REPLAY_MODE"
 echo "PI0 host: $PI0_HOST"
 echo "PI0 port: $PI0_PORT"
@@ -551,6 +590,7 @@ if [[ "$REPLAY_MODE" == "hybrid" ]]; then
   echo "Manipulate max steps: $MANIPULATE_MAX_STEPS"
   echo "Manipulate replan interval steps: $MANIPULATE_REPLAN_INTERVAL_STEPS"
 fi
+echo "Visualize: $VISUALIZE"
 echo "Python: $PYTHON_CMD"
 echo "openpi_client src: $OPENPI_CLIENT_SRC"
 echo "Start target: $EFFECTIVE_START_TARGET"

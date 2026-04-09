@@ -38,6 +38,8 @@ class Args:
     navigation_only: bool = False  # Run navigation only, skip manipulation
     skip_server_checks: bool = False
     server_check_timeout_sec: float = 5.0
+    visualize: bool = False  # Show camera views + subtask overlay during replay (web UI)
+    visualize_port: int = 7860  # Port for the visualization web server
     planner: PlannerConfig = dataclasses.field(default_factory=PlannerConfig)
 
 
@@ -167,6 +169,7 @@ def _run_replay_manipulation_subtask(
     subtask_prompt: str,
     max_steps: int,
     replan_interval_steps: int,
+    visualizer=None,
 ) -> dict[str, object]:
     prompt_history: list[dict[str, object]] = []
     current_policy_prompt = subtask_prompt
@@ -240,6 +243,12 @@ def _run_replay_manipulation_subtask(
         environment.apply_action(action)
         executed_steps += 1
 
+        if visualizer is not None:
+            step_idx = environment.get_cursor() - 1
+            if not visualizer.update(step_idx, extra_info=f"policy prompt: {current_policy_prompt}"):
+                logging.info("Replay manipulate aborted by user at policy step %d.", executed_steps)
+                break
+
         if (
             executed_steps < max_steps
             and not environment.is_episode_complete()
@@ -292,6 +301,7 @@ def _log_hybrid_replay_summary(
 
 def _run_replay_inference(args: Args, prompt: str) -> None:
     from examples.piper_real import replay_env as _replay_env
+    from examples.piper_real import replay_visualizer as _replay_visualizer
 
     if args.num_episodes != 1:
         logging.error("--replay-dataset currently supports only --num-episodes=1.")
@@ -319,23 +329,33 @@ def _run_replay_inference(args: Args, prompt: str) -> None:
             args.max_episode_steps,
         )
 
+    visualizer = _replay_visualizer.ReplayVisualizer(environment, enabled=args.visualize, port=args.visualize_port)
+    visualizer.set_subtask_context(1, 1, "policy", prompt)
+
     environment.reset()
     agent.reset()
 
     executed_steps = 0
-    while not environment.is_episode_complete():
-        observation = environment.get_observation()
-        action = agent.get_action(observation)
-        environment.apply_action(action)
-        executed_steps += 1
+    try:
+        while not environment.is_episode_complete():
+            observation = environment.get_observation()
+            action = agent.get_action(observation)
+            environment.apply_action(action)
+            executed_steps += 1
 
-        if args.max_episode_steps > 0 and executed_steps >= args.max_episode_steps:
-            logging.info(
-                "Replay stopped early at %d steps due to --max-episode-steps=%d.",
-                executed_steps,
-                args.max_episode_steps,
-            )
-            break
+            if not visualizer.update(executed_steps - 1):
+                logging.info("Replay aborted by user at step %d.", executed_steps)
+                break
+
+            if args.max_episode_steps > 0 and executed_steps >= args.max_episode_steps:
+                logging.info(
+                    "Replay stopped early at %d steps due to --max-episode-steps=%d.",
+                    executed_steps,
+                    args.max_episode_steps,
+                )
+                break
+    finally:
+        visualizer.close()
 
     _log_replay_summary(environment, executed_steps)
 
@@ -343,6 +363,7 @@ def _run_replay_inference(args: Args, prompt: str) -> None:
 def _run_replay_planner(args: Args, prompt: str) -> None:
     from examples.piper_real import replay_env as _replay_env
     from examples.piper_real import replay_planner as _replay_planner
+    from examples.piper_real import replay_visualizer as _replay_visualizer
 
     if args.num_episodes != 1:
         logging.error("--replay-dataset with --use-llm-planner currently supports only --num-episodes=1.")
@@ -377,7 +398,14 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
         environment.close()
         return
 
-    planner = _replay_planner.OfflineReplayNavigationPlanner(environment, args.planner)
+    visualizer = _replay_visualizer.ReplayVisualizer(environment, enabled=args.visualize, port=args.visualize_port)
+
+    def _on_nav_step(step_idx: int) -> bool:
+        return visualizer.update(step_idx)
+
+    planner = _replay_planner.OfflineReplayNavigationPlanner(
+        environment, args.planner, on_step_callback=_on_nav_step,
+    )
     try:
         for idx, subtask in enumerate(subtask_list):
             logging.info(
@@ -386,6 +414,7 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
             )
 
             if subtask.type == "navigate":
+                visualizer.set_subtask_context(idx + 1, len(subtask_list), subtask.type, subtask.prompt)
                 if not planner.run(task_prompt=subtask.prompt):
                     logging.error(
                         "Replay navigation failed at subtask %d/%d; aborting.",
@@ -411,6 +440,7 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
             environment.front_camera_name,
         )
     finally:
+        visualizer.close()
         environment.close()
 
 
@@ -418,6 +448,7 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
     from examples.piper_real import replay_env as _replay_env
     from examples.piper_real import replay_manipulation_planner as _replay_manipulation_planner
     from examples.piper_real import replay_planner as _replay_planner
+    from examples.piper_real import replay_visualizer as _replay_visualizer
 
     if args.num_episodes != 1:
         logging.error("--replay-dataset with --replay-mode=hybrid currently supports only --num-episodes=1.")
@@ -455,7 +486,14 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
         environment.close()
         return
 
-    planner = _replay_planner.OfflineReplayNavigationPlanner(environment, args.planner)
+    visualizer = _replay_visualizer.ReplayVisualizer(environment, enabled=args.visualize, port=args.visualize_port)
+
+    def _on_nav_step(step_idx: int) -> bool:
+        return visualizer.update(step_idx)
+
+    planner = _replay_planner.OfflineReplayNavigationPlanner(
+        environment, args.planner, on_step_callback=_on_nav_step,
+    )
     policy_agent = None if args.navigation_only else _create_policy_agent(args)
     manipulation_planner = (
         None
@@ -476,6 +514,7 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                 subtask.type,
                 subtask.prompt,
             )
+            visualizer.set_subtask_context(idx + 1, len(subtask_list), subtask.type, subtask.prompt)
 
             if subtask.type == "navigate":
                 if not planner.run(task_prompt=subtask.prompt):
@@ -508,6 +547,7 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                 subtask_prompt=subtask.prompt,
                 max_steps=args.replay_manipulate_max_steps,
                 replan_interval_steps=args.replay_manipulate_replan_interval_steps,
+                visualizer=visualizer,
             )
             executed_steps = int(manipulation_result["executed_steps"])
             completed_manipulate += 1
@@ -540,6 +580,7 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
             prompt_queries=prompt_queries,
         )
     finally:
+        visualizer.close()
         environment.close()
 
 

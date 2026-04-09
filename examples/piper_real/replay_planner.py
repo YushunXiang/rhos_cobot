@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import collections
 import math
+from typing import Callable
+from typing import Optional
 from types import SimpleNamespace
 
 from examples.piper_real.llm_planner import LLMNavigationPlanner
@@ -48,12 +50,18 @@ def _make_fake_odometry(odom: dict[str, float]):
 class OfflineReplayNavigationPlanner(LLMNavigationPlanner):
     """Drive the navigation planner with recorded frames instead of live ROS topics."""
 
-    def __init__(self, replay_environment: ReplayEnvironment, config: PlannerConfig) -> None:
+    def __init__(
+        self,
+        replay_environment: ReplayEnvironment,
+        config: PlannerConfig,
+        on_step_callback: Optional[Callable[[int], bool]] = None,
+    ) -> None:
         self.replay_environment = replay_environment
         self._replay_step = replay_environment.get_cursor()
         self._replay_exhausted = (
             replay_environment.num_steps == 0 or self._replay_step >= replay_environment.num_steps
         )
+        self._on_step_callback = on_step_callback
         ros_operator = _ReplayRosOperator()
         super().__init__(ros_operator=ros_operator, config=config)
         if not self._replay_exhausted:
@@ -149,6 +157,8 @@ class OfflineReplayNavigationPlanner(LLMNavigationPlanner):
         self.ros_operator.robot_base_deque.append(
             _make_fake_odometry(self.replay_environment.get_estimated_odometry(step_idx))
         )
+        if self._on_step_callback is not None:
+            self._on_step_callback(step_idx)
 
     def _mark_replay_exhausted(self) -> None:
         self._replay_exhausted = True

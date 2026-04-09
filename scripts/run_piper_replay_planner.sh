@@ -341,6 +341,10 @@ if [[ "$NAVIGATION_ONLY" == "1" ]]; then
   cmd+=(--navigation-only)
 fi
 
+if [[ "${VISUALIZE:-0}" == "1" ]]; then
+  cmd+=(--visualize)
+fi
+
 if [[ "${#MAIN_ARGS[@]}" -gt 0 ]]; then
   cmd+=("${MAIN_ARGS[@]}")
 fi
