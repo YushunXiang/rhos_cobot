@@ -34,6 +34,7 @@ Wrapper options:
                      Stop any existing replay mock process before starting
                      default: enabled
   --visualize         Show camera views and subtask overlay during replay
+  --save-path PATH    Save replay visualization to MP4 at PATH
   --no-kill-existing-replay
                      Keep any existing replay mock process alive
   --replay-kill-grace-sec SECONDS
@@ -81,6 +82,8 @@ Environment overrides:
   START_TARGET       Which startup helper to use in local/remote mode
                      values: pi0, all
                      default: pi0
+  SAVE_PATH          Forwarded to main.py --save-path for MP4 output
+                     default: empty (disabled)
   WAIT_FOR_PI0_READY Set to 0 to skip the preflight wait loop
                      default: 1
   PI0_READY_TIMEOUT_SEC
@@ -124,6 +127,7 @@ KILL_EXISTING_REPLAY="${KILL_EXISTING_REPLAY:-1}"
 REPLAY_KILL_GRACE_SEC="${REPLAY_KILL_GRACE_SEC:-5}"
 REPLAY_MODE="${REPLAY_MODE:-policy}"
 VISUALIZE=0
+SAVE_PATH="${SAVE_PATH:-}"
 MOCK_PI0=0
 MAIN_ARGS=()
 
@@ -160,6 +164,18 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --visualize)
       VISUALIZE=1
+      shift
+      ;;
+    --save-path)
+      if [[ "$#" -lt 2 ]]; then
+        echo "--save-path requires a value." >&2
+        exit 2
+      fi
+      SAVE_PATH="$2"
+      shift 2
+      ;;
+    --save-path=*)
+      SAVE_PATH="${1#*=}"
       shift
       ;;
     --no-kill-existing-replay)
@@ -395,10 +411,14 @@ delegate_to_planner_replay() {
   export TASK_NAME PROMPT_SOURCE
   export KILL_EXISTING_REPLAY REPLAY_KILL_GRACE_SEC
   export VISUALIZE
+  export SAVE_PATH
   export START_TARGET="$planner_start_target"
 
   echo "REPLAY_MODE=planner detected; delegating to scripts/run_piper_replay_planner.sh"
   local -a delegate_cmd=(bash "$SCRIPT_DIR/run_piper_replay_planner.sh" "$MODE")
+  if [[ -n "$SAVE_PATH" ]]; then
+    delegate_cmd+=(--save-path "$SAVE_PATH")
+  fi
   if [[ "${#MAIN_ARGS[@]}" -gt 0 ]]; then
     delegate_cmd+=(-- "${MAIN_ARGS[@]}")
   fi
@@ -571,6 +591,10 @@ if [[ "$VISUALIZE" == "1" ]]; then
   cmd+=(--visualize)
 fi
 
+if [[ -n "$SAVE_PATH" ]]; then
+  cmd+=(--save-path "$SAVE_PATH")
+fi
+
 if [[ "${#MAIN_ARGS[@]}" -gt 0 ]]; then
   cmd+=("${MAIN_ARGS[@]}")
 fi
@@ -591,6 +615,7 @@ if [[ "$REPLAY_MODE" == "hybrid" ]]; then
   echo "Manipulate replan interval steps: $MANIPULATE_REPLAN_INTERVAL_STEPS"
 fi
 echo "Visualize: $VISUALIZE"
+echo "Save path: ${SAVE_PATH:-<unset>}"
 echo "Python: $PYTHON_CMD"
 echo "openpi_client src: $OPENPI_CLIENT_SRC"
 echo "Start target: $EFFECTIVE_START_TARGET"

@@ -46,6 +46,7 @@ class Args:
         False  # Show camera views + subtask overlay during replay (web UI)
     )
     visualize_port: int = 7860  # Port for the visualization web server
+    save_path: str = ""  # Optional MP4 output path synchronized with visualize updates
     visualize_playback_rate: float = (
         1.0  # Relative replay visualization speed (1.0 = dataset FPS)
     )
@@ -390,7 +391,10 @@ def _run_replay_inference(args: Args, prompt: str) -> None:
         )
 
     visualizer = _replay_visualizer.ReplayVisualizer(
-        environment, enabled=args.visualize, port=args.visualize_port
+        environment,
+        enabled=args.visualize,
+        port=args.visualize_port,
+        save_path=args.save_path,
     )
     visualizer.set_subtask_context(1, 1, "policy", prompt)
 
@@ -469,7 +473,10 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
         return
 
     visualizer = _replay_visualizer.ReplayVisualizer(
-        environment, enabled=args.visualize, port=args.visualize_port
+        environment,
+        enabled=args.visualize,
+        port=args.visualize_port,
+        save_path=args.save_path,
     )
     on_nav_step = _build_navigation_visualizer_updater(
         environment,
@@ -595,7 +602,10 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
         return
 
     visualizer = _replay_visualizer.ReplayVisualizer(
-        environment, enabled=args.visualize, port=args.visualize_port
+        environment,
+        enabled=args.visualize,
+        port=args.visualize_port,
+        save_path=args.save_path,
     )
     on_nav_step = _build_navigation_visualizer_updater(
         environment,
