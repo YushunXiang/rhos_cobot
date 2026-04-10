@@ -4,6 +4,7 @@
 """
 import dataclasses
 import logging
+import time
 
 import numpy as np
 
@@ -20,6 +21,7 @@ DEFAULT_REPLAY_MANIPULATE_MAX_STEPS = 64
 DEFAULT_REPLAY_MANIPULATE_REPLAN_INTERVAL_STEPS = 16
 _VALID_REPLAY_MODES = {"policy", "planner", "hybrid"}
 
+
 @dataclasses.dataclass
 class Args:
     host: str = "10.42.0.2"  # H100
@@ -32,14 +34,21 @@ class Args:
     replay_dataset: str = ""  # Path to HDF5 episode file for offline replay
     replay_mode: str = "policy"  # policy | planner | hybrid
     replay_manipulate_max_steps: int = DEFAULT_REPLAY_MANIPULATE_MAX_STEPS
-    replay_manipulate_replan_interval_steps: int = DEFAULT_REPLAY_MANIPULATE_REPLAN_INTERVAL_STEPS
+    replay_manipulate_replan_interval_steps: int = (
+        DEFAULT_REPLAY_MANIPULATE_REPLAN_INTERVAL_STEPS
+    )
     use_llm_planner: bool = False
     use_robot_base: bool = False
     navigation_only: bool = False  # Run navigation only, skip manipulation
     skip_server_checks: bool = False
     server_check_timeout_sec: float = 5.0
-    visualize: bool = False  # Show camera views + subtask overlay during replay (web UI)
+    visualize: bool = (
+        False  # Show camera views + subtask overlay during replay (web UI)
+    )
     visualize_port: int = 7860  # Port for the visualization web server
+    visualize_playback_rate: float = (
+        1.0  # Relative replay visualization speed (1.0 = dataset FPS)
+    )
     planner: PlannerConfig = dataclasses.field(default_factory=PlannerConfig)
 
 
@@ -129,7 +138,9 @@ def _resolve_replay_mode(args: Args) -> str:
             f"--replay-mode must be one of {sorted(_VALID_REPLAY_MODES)}, got {args.replay_mode!r}."
         )
     if args.use_llm_planner and replay_mode == "policy":
-        logging.info("Replay mode inferred as planner from legacy --use-llm-planner flag.")
+        logging.info(
+            "Replay mode inferred as planner from legacy --use-llm-planner flag."
+        )
         return "planner"
     return replay_mode
 
@@ -151,7 +162,9 @@ def _build_replay_subtask_list(args: Args, prompt: str):
         logging.error("Task decomposition failed: %s", exc)
         return None
 
-    if args.navigation_only and not any(subtask.type == "navigate" for subtask in subtask_list):
+    if args.navigation_only and not any(
+        subtask.type == "navigate" for subtask in subtask_list
+    ):
         logging.warning(
             "Replay decomposition returned no navigate subtasks; "
             "using the original prompt as a single navigate subtask."
@@ -245,8 +258,13 @@ def _run_replay_manipulation_subtask(
 
         if visualizer is not None:
             step_idx = environment.get_cursor() - 1
-            if not visualizer.update(step_idx, extra_info=f"policy prompt: {current_policy_prompt}"):
-                logging.info("Replay manipulate aborted by user at policy step %d.", executed_steps)
+            if not visualizer.update(
+                step_idx, extra_info=f"policy prompt: {current_policy_prompt}"
+            ):
+                logging.info(
+                    "Replay manipulate aborted by user at policy step %d.",
+                    executed_steps,
+                )
                 break
 
         if (
@@ -263,9 +281,13 @@ def _run_replay_manipulation_subtask(
             }
 
     if executed_steps >= max_steps and not environment.is_episode_complete():
-        logging.info("Replay manipulate subtask hit fixed cap at %d policy steps.", max_steps)
+        logging.info(
+            "Replay manipulate subtask hit fixed cap at %d policy steps.", max_steps
+        )
     elif environment.is_episode_complete():
-        logging.info("Replay manipulate subtask stopped because the replay dataset is exhausted.")
+        logging.info(
+            "Replay manipulate subtask stopped because the replay dataset is exhausted."
+        )
 
     return {
         "executed_steps": executed_steps,
@@ -299,6 +321,41 @@ def _log_hybrid_replay_summary(
         _log_replay_summary(environment, policy_steps)
 
 
+def _get_visualizer_step(environment) -> int:
+    if environment.num_steps <= 0:
+        return 0
+    return min(max(environment.get_cursor(), 0), environment.num_steps - 1)
+
+
+def _build_navigation_visualizer_updater(
+    environment, visualizer, *, playback_rate: float, enabled: bool
+):
+    frame_interval_sec = 0.0
+    if enabled and environment.fps > 0:
+        frame_interval_sec = 1.0 / (environment.fps * playback_rate)
+
+    next_refresh_at: float | None = None
+
+    def _on_nav_step(step_idx: int) -> bool:
+        nonlocal next_refresh_at
+        if frame_interval_sec > 0:
+            now = time.monotonic()
+            if next_refresh_at is None:
+                next_refresh_at = now
+            elif now < next_refresh_at:
+                time.sleep(next_refresh_at - now)
+                now = time.monotonic()
+            next_refresh_at = now + frame_interval_sec
+
+        extra_info = (
+            f"navigate timeline frame: {step_idx + 1}/{environment.num_steps}, "
+            f"playback: {playback_rate:.2f}x"
+        )
+        return visualizer.update(step_idx, extra_info=extra_info)
+
+    return _on_nav_step
+
+
 def _run_replay_inference(args: Args, prompt: str) -> None:
     from examples.piper_real import replay_env as _replay_env
     from examples.piper_real import replay_visualizer as _replay_visualizer
@@ -321,7 +378,10 @@ def _run_replay_inference(args: Args, prompt: str) -> None:
 
     agent = _create_policy_agent(args)
 
-    if args.max_episode_steps == DEFAULT_MAX_EPISODE_STEPS and environment.num_steps > args.max_episode_steps:
+    if (
+        args.max_episode_steps == DEFAULT_MAX_EPISODE_STEPS
+        and environment.num_steps > args.max_episode_steps
+    ):
         logging.warning(
             "Replay dataset has %d steps; default --max-episode-steps=%d will truncate it. "
             "Pass --max-episode-steps 0 to run the full dataset.",
@@ -329,7 +389,9 @@ def _run_replay_inference(args: Args, prompt: str) -> None:
             args.max_episode_steps,
         )
 
-    visualizer = _replay_visualizer.ReplayVisualizer(environment, enabled=args.visualize, port=args.visualize_port)
+    visualizer = _replay_visualizer.ReplayVisualizer(
+        environment, enabled=args.visualize, port=args.visualize_port
+    )
     visualizer.set_subtask_context(1, 1, "policy", prompt)
 
     environment.reset()
@@ -366,15 +428,23 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
     from examples.piper_real import replay_visualizer as _replay_visualizer
 
     if args.num_episodes != 1:
-        logging.error("--replay-dataset with --use-llm-planner currently supports only --num-episodes=1.")
+        logging.error(
+            "--replay-dataset with --use-llm-planner currently supports only --num-episodes=1."
+        )
         return
 
     if not prompt:
-        logging.error("--use-llm-planner with --replay-dataset requires a non-empty --prompt.")
+        logging.error(
+            "--use-llm-planner with --replay-dataset requires a non-empty --prompt."
+        )
         return
 
     if args.save_log:
         logging.info("--save-log is ignored in replay planner mode.")
+
+    if args.visualize_playback_rate <= 0:
+        logging.error("--visualize-playback-rate must be positive.")
+        return
 
     args.planner.validate_service_config()
     args.planner.validate_motion_limits()
@@ -398,27 +468,47 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
         environment.close()
         return
 
-    visualizer = _replay_visualizer.ReplayVisualizer(environment, enabled=args.visualize, port=args.visualize_port)
-
-    def _on_nav_step(step_idx: int) -> bool:
-        return visualizer.update(step_idx)
+    visualizer = _replay_visualizer.ReplayVisualizer(
+        environment, enabled=args.visualize, port=args.visualize_port
+    )
+    on_nav_step = _build_navigation_visualizer_updater(
+        environment,
+        visualizer,
+        playback_rate=args.visualize_playback_rate,
+        enabled=args.visualize,
+    )
 
     planner = _replay_planner.OfflineReplayNavigationPlanner(
-        environment, args.planner, on_step_callback=_on_nav_step,
+        environment,
+        args.planner,
+        on_step_callback=on_nav_step,
     )
     try:
         for idx, subtask in enumerate(subtask_list):
             logging.info(
                 "Executing replay subtask %d/%d [%s]: %s",
-                idx + 1, len(subtask_list), subtask.type, subtask.prompt,
+                idx + 1,
+                len(subtask_list),
+                subtask.type,
+                subtask.prompt,
             )
 
             if subtask.type == "navigate":
-                visualizer.set_subtask_context(idx + 1, len(subtask_list), subtask.type, subtask.prompt)
+                visualizer.set_subtask_context(
+                    idx + 1, len(subtask_list), subtask.type, subtask.prompt
+                )
+                if not on_nav_step(_get_visualizer_step(environment)):
+                    logging.info(
+                        "Replay planner aborted by user before subtask %d/%d.",
+                        idx + 1,
+                        len(subtask_list),
+                    )
+                    return
                 if not planner.run(task_prompt=subtask.prompt):
                     logging.error(
                         "Replay navigation failed at subtask %d/%d; aborting.",
-                        idx + 1, len(subtask_list),
+                        idx + 1,
+                        len(subtask_list),
                     )
                     return
                 logging.info(
@@ -431,7 +521,9 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
             elif args.navigation_only:
                 logging.info("Manipulate (skipped): %s", subtask.prompt)
             else:
-                logging.info("Manipulate (skipped in replay planner mode): %s", subtask.prompt)
+                logging.info(
+                    "Manipulate (skipped in replay planner mode): %s", subtask.prompt
+                )
 
         logging.info(
             "Replay planner completed successfully at replay step %d/%d using camera %s.",
@@ -446,32 +538,48 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
 
 def _run_replay_hybrid(args: Args, prompt: str) -> None:
     from examples.piper_real import replay_env as _replay_env
-    from examples.piper_real import replay_manipulation_planner as _replay_manipulation_planner
+    from examples.piper_real import (
+        replay_manipulation_planner as _replay_manipulation_planner,
+    )
     from examples.piper_real import replay_planner as _replay_planner
     from examples.piper_real import replay_visualizer as _replay_visualizer
 
     if args.num_episodes != 1:
-        logging.error("--replay-dataset with --replay-mode=hybrid currently supports only --num-episodes=1.")
+        logging.error(
+            "--replay-dataset with --replay-mode=hybrid currently supports only --num-episodes=1."
+        )
         return
 
     if not prompt:
-        logging.error("--replay-mode=hybrid with --replay-dataset requires a non-empty --prompt.")
+        logging.error(
+            "--replay-mode=hybrid with --replay-dataset requires a non-empty --prompt."
+        )
         return
 
     if args.replay_manipulate_max_steps <= 0:
-        logging.error("--replay-manipulate-max-steps must be positive in hybrid replay mode.")
+        logging.error(
+            "--replay-manipulate-max-steps must be positive in hybrid replay mode."
+        )
         return
 
     if args.replay_manipulate_replan_interval_steps <= 0:
-        logging.error("--replay-manipulate-replan-interval-steps must be positive in hybrid replay mode.")
+        logging.error(
+            "--replay-manipulate-replan-interval-steps must be positive in hybrid replay mode."
+        )
         return
 
     if args.save_log:
         logging.info("--save-log is ignored in replay hybrid mode.")
 
+    if args.visualize_playback_rate <= 0:
+        logging.error("--visualize-playback-rate must be positive.")
+        return
+
     args.planner.validate_service_config()
     args.planner.validate_motion_limits()
-    if not _run_required_server_checks(args, needs_pi0=not args.navigation_only, needs_planner=True):
+    if not _run_required_server_checks(
+        args, needs_pi0=not args.navigation_only, needs_planner=True
+    ):
         return
 
     logging.info("Replay hybrid mode: loading %s", args.replay_dataset)
@@ -486,19 +594,28 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
         environment.close()
         return
 
-    visualizer = _replay_visualizer.ReplayVisualizer(environment, enabled=args.visualize, port=args.visualize_port)
-
-    def _on_nav_step(step_idx: int) -> bool:
-        return visualizer.update(step_idx)
+    visualizer = _replay_visualizer.ReplayVisualizer(
+        environment, enabled=args.visualize, port=args.visualize_port
+    )
+    on_nav_step = _build_navigation_visualizer_updater(
+        environment,
+        visualizer,
+        playback_rate=args.visualize_playback_rate,
+        enabled=args.visualize,
+    )
 
     planner = _replay_planner.OfflineReplayNavigationPlanner(
-        environment, args.planner, on_step_callback=_on_nav_step,
+        environment,
+        args.planner,
+        on_step_callback=on_nav_step,
     )
     policy_agent = None if args.navigation_only else _create_policy_agent(args)
     manipulation_planner = (
         None
         if args.navigation_only
-        else _replay_manipulation_planner.ReplayManipulationPromptPlanner(environment, args.planner)
+        else _replay_manipulation_planner.ReplayManipulationPromptPlanner(
+            environment, args.planner
+        )
     )
     completed_navigate = 0
     completed_manipulate = 0
@@ -514,9 +631,18 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                 subtask.type,
                 subtask.prompt,
             )
-            visualizer.set_subtask_context(idx + 1, len(subtask_list), subtask.type, subtask.prompt)
+            visualizer.set_subtask_context(
+                idx + 1, len(subtask_list), subtask.type, subtask.prompt
+            )
 
             if subtask.type == "navigate":
+                if not on_nav_step(_get_visualizer_step(environment)):
+                    logging.info(
+                        "Replay hybrid aborted by user before subtask %d/%d.",
+                        idx + 1,
+                        len(subtask_list),
+                    )
+                    return
                 if not planner.run(task_prompt=subtask.prompt):
                     logging.error(
                         "Replay navigation failed at subtask %d/%d; aborting.",
@@ -538,8 +664,12 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                 logging.info("Manipulate (skipped): %s", subtask.prompt)
                 continue
 
-            assert policy_agent is not None, "hybrid manipulate subtask requires a policy agent"
-            assert manipulation_planner is not None, "hybrid manipulate subtask requires a prompt replanner"
+            assert (
+                policy_agent is not None
+            ), "hybrid manipulate subtask requires a policy agent"
+            assert (
+                manipulation_planner is not None
+            ), "hybrid manipulate subtask requires a prompt replanner"
             manipulation_result = _run_replay_manipulation_subtask(
                 environment,
                 policy_agent,
@@ -595,7 +725,9 @@ def main(args: Args) -> None:
             return
 
         if args.use_robot_base:
-            logging.error("--use-robot-base and --replay-dataset are mutually exclusive.")
+            logging.error(
+                "--use-robot-base and --replay-dataset are mutually exclusive."
+            )
             return
 
         if replay_mode == "planner":
@@ -635,12 +767,16 @@ def main(args: Args) -> None:
     if not args.use_llm_planner or not prompt:
         if args.use_llm_planner:
             args.planner.validate_service_config()
-            logging.info("LLM planner enabled but prompt is empty; running stationary manipulation.")
+            logging.info(
+                "LLM planner enabled but prompt is empty; running stationary manipulation."
+            )
 
         if not _run_required_server_checks(args, needs_pi0=True):
             return
 
-        ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(host=args.host, port=args.port)
+        ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
+            host=args.host, port=args.port
+        )
         metadata = ws_client_policy.get_server_metadata()
         logging.info("Server metadata: %s", metadata)
 
@@ -729,7 +865,10 @@ def main(args: Args) -> None:
         for idx, subtask in enumerate(subtask_list):
             logging.info(
                 "Executing subtask %d/%d [%s]: %s",
-                idx + 1, len(subtask_list), subtask.type, subtask.prompt,
+                idx + 1,
+                len(subtask_list),
+                subtask.type,
+                subtask.prompt,
             )
 
             if subtask.type == "navigate":
@@ -742,12 +881,16 @@ def main(args: Args) -> None:
                 if not result.ok:
                     logging.error(
                         "Navigation failed at subtask %d/%d: %s",
-                        idx + 1, len(subtask_list), result.error or "unknown error",
+                        idx + 1,
+                        len(subtask_list),
+                        result.error or "unknown error",
                     )
                     return
                 logging.info(
                     "Navigate subtask %d/%d succeeded via routine %s.",
-                    idx + 1, len(subtask_list), result.routine_name,
+                    idx + 1,
+                    len(subtask_list),
+                    result.routine_name,
                 )
 
             elif subtask.type == "manipulate":
@@ -755,7 +898,9 @@ def main(args: Args) -> None:
                     logging.info("Manipulate (skipped): %s", subtask.prompt)
                     continue
 
-                assert ws_client_policy is not None, "manipulate subtask requires server connection"
+                assert (
+                    ws_client_policy is not None
+                ), "manipulate subtask requires server connection"
                 environment.set_prompt(subtask.prompt)
                 runtime = _runtime.Runtime(
                     environment=environment,
@@ -771,7 +916,9 @@ def main(args: Args) -> None:
                     max_episode_steps=args.max_episode_steps,
                 )
                 runtime.run()
-                logging.info("Manipulate subtask %d/%d completed.", idx + 1, len(subtask_list))
+                logging.info(
+                    "Manipulate subtask %d/%d completed.", idx + 1, len(subtask_list)
+                )
 
         logging.info("All subtasks completed successfully.")
     finally:

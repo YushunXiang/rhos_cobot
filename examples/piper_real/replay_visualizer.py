@@ -139,6 +139,7 @@ poll();
 
 # ── HTTP handler ────────────────────────────────────────────────────────────
 
+
 class _Handler(BaseHTTPRequestHandler):
     """Serves the index page and a JSON state endpoint."""
 
@@ -168,6 +169,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 # ── Main class ──────────────────────────────────────────────────────────────
+
 
 class ReplayVisualizer:
     """Web-based tiled camera views with subtask overlay.
@@ -223,12 +225,15 @@ class ReplayVisualizer:
         total_subtasks: int,
         subtask_type: str,
         subtask_prompt: str,
+        *,
+        extra_info: str = "",
     ) -> None:
         with self._lock:
             self._subtask_idx = subtask_idx
             self._total_subtasks = total_subtasks
             self._subtask_type = subtask_type
             self._subtask_prompt = subtask_prompt
+        self._extra_info = extra_info
 
     def update(self, step: int, *, extra_info: str = "") -> bool:
         """Push a new frame to the web UI.  Always returns ``True``."""

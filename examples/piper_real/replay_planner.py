@@ -59,7 +59,8 @@ class OfflineReplayNavigationPlanner(LLMNavigationPlanner):
         self.replay_environment = replay_environment
         self._replay_step = replay_environment.get_cursor()
         self._replay_exhausted = (
-            replay_environment.num_steps == 0 or self._replay_step >= replay_environment.num_steps
+            replay_environment.num_steps == 0
+            or self._replay_step >= replay_environment.num_steps
         )
         self._on_step_callback = on_step_callback
         ros_operator = _ReplayRosOperator()
@@ -102,12 +103,16 @@ class OfflineReplayNavigationPlanner(LLMNavigationPlanner):
 
     def capture_front_image(self) -> str:
         if self._replay_exhausted:
-            raise PlannerResponseError("replay dataset exhausted before planner returned stop")
+            raise PlannerResponseError(
+                "replay dataset exhausted before planner returned stop"
+            )
         return super().capture_front_image()
 
     def get_odometry(self) -> dict[str, float]:
         if self._replay_exhausted:
-            raise PlannerResponseError("replay dataset exhausted before planner returned stop")
+            raise PlannerResponseError(
+                "replay dataset exhausted before planner returned stop"
+            )
         return super().get_odometry()
 
     def execute_command(self, cmd: dict[str, object]) -> dict[str, object]:
@@ -115,7 +120,9 @@ class OfflineReplayNavigationPlanner(LLMNavigationPlanner):
         angular_z = float(cmd["angular_z"])
         duration = float(cmd.get("duration", self.config.default_duration))
         replay_step_before = self._replay_step
-        recorded_base_action = self.replay_environment.get_recorded_base_action(replay_step_before)
+        recorded_base_action = self.replay_environment.get_recorded_base_action(
+            replay_step_before
+        )
 
         self.ros_operator.robot_base_publish([linear_x, angular_z])
         replay_frames_advanced = self._advance_replay_cursor(duration)
@@ -130,7 +137,9 @@ class OfflineReplayNavigationPlanner(LLMNavigationPlanner):
             "replay_frames_advanced": replay_frames_advanced,
             "replay_front_camera": self.replay_environment.front_camera_name,
             "recorded_base_action": (
-                recorded_base_action.tolist() if recorded_base_action is not None else None
+                recorded_base_action.tolist()
+                if recorded_base_action is not None
+                else None
             ),
         }
 
@@ -148,17 +157,27 @@ class OfflineReplayNavigationPlanner(LLMNavigationPlanner):
         return advanced
 
     def _load_replay_step(self, step_idx: int) -> None:
+        previous_step = self._replay_step
         self._replay_step = step_idx
         self._replay_exhausted = False
         self.replay_environment.set_cursor(step_idx)
         self.ros_operator.img_front_deque.clear()
         self.ros_operator.robot_base_deque.clear()
-        self.ros_operator.img_front_deque.append(self.replay_environment.get_front_image(step_idx))
+        self.ros_operator.img_front_deque.append(
+            self.replay_environment.get_front_image(step_idx)
+        )
         self.ros_operator.robot_base_deque.append(
-            _make_fake_odometry(self.replay_environment.get_estimated_odometry(step_idx))
+            _make_fake_odometry(
+                self.replay_environment.get_estimated_odometry(step_idx)
+            )
         )
         if self._on_step_callback is not None:
-            self._on_step_callback(step_idx)
+            if step_idx <= previous_step:
+                self._on_step_callback(step_idx)
+                return
+            for frame_idx in range(previous_step + 1, step_idx + 1):
+                if not self._on_step_callback(frame_idx):
+                    break
 
     def _mark_replay_exhausted(self) -> None:
         self._replay_exhausted = True
