@@ -54,23 +54,23 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         gap: 6px;
         pointer-events: none;
     }
-    .hud-line,
-    #subtask-type {
+    .hud-line {
         background: rgba(88, 92, 104, 0.45);
         border: 1px solid rgba(180, 185, 198, 0.25);
         border-radius: 6px;
         padding: 4px 9px;
         backdrop-filter: blur(1px);
         text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
+        width: 100%;
     }
-    #progress { font-size: 14px; font-weight: 700; color: #f4f5fb; }
-    #subtask-index { font-size: 13px; color: #dde3f2; margin-right: 6px; }
-    #subtask-type { display: inline-block; font-size: 12px; font-weight: 700; }
+    #progress { font-size: 12px; font-weight: 600; color: #f4f5fb; }
+    #subtask-index { font-size: 11px; color: #dde3f2; margin-right: 6px; }
+    #subtask-type { display: inline-block; font-size: 11px; font-weight: 700; }
     #subtask-type.navigate { color: #8ff7e6; }
     #subtask-type.manipulate { color: #ffb6c3; }
     #subtask-type.policy { color: #c8c4ff; }
-    #subtask-prompt { font-size: 13px; color: #f0f0f4; max-width: 100%; }
-    #extra-info { font-size: 12px; color: #b8d3ff; }
+    #subtask-prompt { font-size: 16px; font-weight: 600; color: #f0f0f4; max-width: 100%; }
+    #extra-info { font-size: 15px; font-weight: 600; color: #b8d3ff; }
   #cameras {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -379,54 +379,84 @@ class ReplayVisualizer:
 
         title = f"Replay step {step_idx + 1}/{self._total_steps}"
         subtask = f"Subtask {subtask_idx}/{total_subtasks} [{subtask_type}]"
+        prompt = f"Prompt: {subtask_prompt}"[:200]
+        info = f"Info: {extra_info}"[:200] if extra_info else ""
+
+        overlay_specs = [
+            (title, 0.50, 1, (245, 245, 245), (8, 5), 30),
+            (subtask, 0.43, 1, (185, 228, 255), (8, 4), 54),
+            (prompt, 0.60, 1, (224, 224, 224), (8, 5), 84),
+            (info, 0.56, 1, (166, 210, 255), (8, 5), 112),
+        ]
+        box_width = self._get_uniform_overlay_box_width(canvas, overlay_specs)
+
         self._draw_text_with_background(
             canvas,
             title,
             org=(16, 30),
-            font_scale=0.70,
+            font_scale=0.50,
             text_color=(245, 245, 245),
             thickness=1,
             bg_color=(96, 96, 96),
             bg_alpha=0.48,
-            padding=(8, 6),
+            padding=(8, 5),
+            box_width=box_width,
         )
         self._draw_text_with_background(
             canvas,
             subtask,
             org=(16, 58),
-            font_scale=0.58,
+            font_scale=0.43,
             text_color=(185, 228, 255),
             thickness=1,
             bg_color=(96, 96, 96),
             bg_alpha=0.48,
-            padding=(8, 5),
+            padding=(8, 4),
+            box_width=box_width,
         )
-        prompt = f"Prompt: {subtask_prompt}"[:200]
         self._draw_text_with_background(
             canvas,
             prompt,
             org=(16, 84),
-            font_scale=0.47,
+            font_scale=0.60,
             text_color=(224, 224, 224),
             thickness=1,
             bg_color=(96, 96, 96),
             bg_alpha=0.46,
-            padding=(7, 4),
+            padding=(8, 5),
+            box_width=box_width,
         )
         if extra_info:
-            info = f"Info: {extra_info}"[:200]
             self._draw_text_with_background(
                 canvas,
                 info,
                 org=(16, 108),
-                font_scale=0.45,
+                font_scale=0.56,
                 text_color=(166, 210, 255),
                 thickness=1,
                 bg_color=(96, 96, 96),
                 bg_alpha=0.46,
-                padding=(7, 4),
+                padding=(8, 5),
+                box_width=box_width,
             )
         return canvas
+
+    def _get_uniform_overlay_box_width(
+        self,
+        image: np.ndarray,
+        specs: list[tuple[str, float, int, tuple[int, int, int], tuple[int, int], int]],
+    ) -> int:
+        font = cv2.FONT_HERSHEY_DUPLEX
+        max_width = 0
+        for text, font_scale, thickness, _, padding, _ in specs:
+            if not text:
+                continue
+            (text_w, _), _ = cv2.getTextSize(text, font, font_scale, thickness)
+            pad_x, _ = padding
+            max_width = max(max_width, text_w + 2 * pad_x)
+        if max_width <= 0:
+            return 220
+        return min(max_width, max(220, image.shape[1] - 24))
 
     def _draw_translucent_rect(
         self,
@@ -461,6 +491,7 @@ class ReplayVisualizer:
         bg_color: tuple[int, int, int],
         bg_alpha: float,
         padding: tuple[int, int],
+        box_width: int | None = None,
     ) -> None:
         if not text:
             return
@@ -468,10 +499,11 @@ class ReplayVisualizer:
         (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
         x, y = org
         pad_x, pad_y = padding
+        rect_width = box_width if box_width is not None else (text_w + 2 * pad_x)
         self._draw_translucent_rect(
             image,
             top_left=(x - pad_x, y - text_h - pad_y),
-            bottom_right=(x + text_w + pad_x, y + baseline + pad_y),
+            bottom_right=(x - pad_x + rect_width, y + baseline + pad_y),
             color=bg_color,
             alpha=bg_alpha,
         )
