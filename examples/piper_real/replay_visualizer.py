@@ -39,61 +39,96 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         color: #eee;
         font-family: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
     }
-  #header {
-    padding: 12px 20px; background: #16213e;
-    display: flex; align-items: center; gap: 16px;
-    border-bottom: 1px solid #0f3460;
-  }
-  #header h1 { font-size: 16px; font-weight: 600; color: #e94560; }
-  #progress { font-size: 13px; color: #a0a0b0; }
-  #subtask-bar {
-    padding: 10px 20px; background: #0f3460;
-    border-bottom: 1px solid #1a1a4e;
-  }
-  #subtask-bar .label { font-size: 11px; color: #7a7a9a; text-transform: uppercase; letter-spacing: 0.5px; }
-    #subtask-index,
-    #subtask-prompt,
-    #extra-info,
-    #subtask-bar .type {
+    #stage {
+        position: relative;
+        padding: 12px;
+    }
+    #hud {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        z-index: 3;
+        max-width: min(62vw, 960px);
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        pointer-events: none;
+    }
+    .hud-line,
+    #subtask-type {
         background: rgba(88, 92, 104, 0.45);
         border: 1px solid rgba(180, 185, 198, 0.25);
         border-radius: 6px;
-        padding: 2px 8px;
+        padding: 4px 9px;
         backdrop-filter: blur(1px);
+        text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
     }
-    #subtask-bar .type { display: inline-block; font-size: 12px; font-weight: 700; margin: 0 6px; }
-    #subtask-bar .type.navigate { color: #8ff7e6; }
-    #subtask-bar .type.manipulate { color: #ffb6c3; }
-    #subtask-bar .type.policy { color: #c8c4ff; }
-    #subtask-prompt { font-size: 13px; margin-top: 6px; color: #e8e8ef; display: inline-block; }
-    #extra-info { font-size: 12px; margin-top: 4px; color: #b8d3ff; display: inline-block; }
+    #progress { font-size: 14px; font-weight: 700; color: #f4f5fb; }
+    #subtask-index { font-size: 13px; color: #dde3f2; margin-right: 6px; }
+    #subtask-type { display: inline-block; font-size: 12px; font-weight: 700; }
+    #subtask-type.navigate { color: #8ff7e6; }
+    #subtask-type.manipulate { color: #ffb6c3; }
+    #subtask-type.policy { color: #c8c4ff; }
+    #subtask-prompt { font-size: 13px; color: #f0f0f4; max-width: 100%; }
+    #extra-info { font-size: 12px; color: #b8d3ff; }
   #cameras {
-    display: flex; flex-wrap: wrap; justify-content: center;
-    gap: 8px; padding: 12px;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        width: 100%;
   }
-  .cam-tile { position: relative; }
-  .cam-tile img { display: block; max-height: 70vh; width: auto; border-radius: 4px; }
+    .cam-tile { position: relative; min-width: 0; }
+    .cam-tile img {
+        display: block;
+        width: 100%;
+        height: clamp(200px, 28vw, 340px);
+        object-fit: contain;
+        background: #0d1021;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+    }
   .cam-label {
-    position: absolute; top: 6px; left: 8px;
-    background: rgba(0,0,0,0.6); color: #fff; font-size: 11px;
-    padding: 2px 6px; border-radius: 3px;
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        background: rgba(90, 90, 100, 0.55);
+        border: 1px solid rgba(186, 186, 196, 0.3);
+        color: #f2f4f8;
+        font-size: 12px;
+        font-weight: 700;
+        padding: 3px 8px;
+        border-radius: 6px;
+        text-shadow: 0 1px 1px rgba(0, 0, 0, 0.45);
   }
   #status { text-align: center; padding: 8px; font-size: 12px; color: #555; }
+    @media (max-width: 1100px) {
+        #cameras { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 760px) {
+        #stage { padding: 8px; }
+        #cameras { grid-template-columns: 1fr; }
+        #hud {
+            top: 14px;
+            left: 14px;
+            right: 14px;
+            max-width: none;
+        }
+    }
 </style>
 </head>
 <body>
-  <div id="header">
-    <h1>Replay Visualizer</h1>
-    <span id="progress">Step -/-</span>
+    <div id="stage">
+        <div id="cameras"></div>
+        <div id="hud">
+            <div class="hud-line" id="progress">Step -/-</div>
+            <div class="hud-line">
+                <span id="subtask-index">-/-</span>
+                <span id="subtask-type">-</span>
+            </div>
+            <div class="hud-line" id="subtask-prompt">-</div>
+            <div class="hud-line" id="extra-info"></div>
+        </div>
   </div>
-  <div id="subtask-bar">
-    <span class="label">Subtask</span>
-    <span id="subtask-index">-/-</span>
-    <span id="subtask-type" class="type">-</span>
-    <div id="subtask-prompt">-</div>
-    <div id="extra-info"></div>
-  </div>
-  <div id="cameras"></div>
   <div id="status">connecting...</div>
 <script>
 const POLL_MS = 150;
@@ -113,7 +148,7 @@ async function poll() {
       d.subtask_idx + '/' + d.total_subtasks;
     const typeEl = document.getElementById('subtask-type');
     typeEl.textContent = d.subtask_type || '-';
-    typeEl.className = 'type ' + (d.subtask_type || '');
+        typeEl.className = d.subtask_type || '';
     document.getElementById('subtask-prompt').textContent = d.subtask_prompt || '';
     document.getElementById('extra-info').textContent = d.extra_info || '';
     document.getElementById('status').textContent =
@@ -331,23 +366,14 @@ class ReplayVisualizer:
                 )
             normalized.append(frame)
 
-        cols = 2 if len(normalized) > 1 else 1
+        cols = min(3, len(normalized)) if len(normalized) > 1 else 1
         rows = (len(normalized) + cols - 1) // cols
-        banner_h = 112
-        canvas = np.zeros((banner_h + rows * tile_h, cols * tile_w, 3), dtype=np.uint8)
-        canvas[:banner_h] = (24, 20, 32)
-        self._draw_translucent_rect(
-            canvas,
-            top_left=(8, 8),
-            bottom_right=(canvas.shape[1] - 8, banner_h - 8),
-            color=(92, 92, 92),
-            alpha=0.42,
-        )
+        canvas = np.zeros((rows * tile_h, cols * tile_w, 3), dtype=np.uint8)
 
         for idx, frame in enumerate(normalized):
             r = idx // cols
             c = idx % cols
-            y0 = banner_h + r * tile_h
+            y0 = r * tile_h
             x0 = c * tile_w
             canvas[y0 : y0 + tile_h, x0 : x0 + tile_w] = frame
 
@@ -392,7 +418,7 @@ class ReplayVisualizer:
             self._draw_text_with_background(
                 canvas,
                 info,
-                org=(16, 106),
+                org=(16, 108),
                 font_scale=0.45,
                 text_color=(166, 210, 255),
                 thickness=1,

@@ -598,6 +598,11 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
 
     subtask_list = _build_replay_subtask_list(args, prompt)
     if subtask_list is None:
+        logging.error(
+            "Replay hybrid exiting before execution at replay step %d/%d: subtask decomposition failed.",
+            environment.get_cursor(),
+            environment.num_steps,
+        )
         environment.close()
         return
 
@@ -632,6 +637,27 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
     policy_steps = 0
     prompt_queries = 0
 
+    def _log_hybrid_early_exit(
+        reason: str, *, subtask_index: int | None = None
+    ) -> None:
+        if subtask_index is None:
+            logging.error(
+                "Replay hybrid exiting early at replay step %d/%d: %s",
+                environment.get_cursor(),
+                environment.num_steps,
+                reason,
+            )
+            return
+
+        logging.error(
+            "Replay hybrid exiting early at replay step %d/%d during subtask %d/%d: %s",
+            environment.get_cursor(),
+            environment.num_steps,
+            subtask_index + 1,
+            len(subtask_list),
+            reason,
+        )
+
     try:
         for idx, subtask in enumerate(subtask_list):
             logging.info(
@@ -647,6 +673,10 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
 
             if subtask.type == "navigate":
                 if not on_nav_step(_get_visualizer_step(environment)):
+                    _log_hybrid_early_exit(
+                        "user aborted before navigation execution",
+                        subtask_index=idx,
+                    )
                     logging.info(
                         "Replay hybrid aborted by user before subtask %d/%d.",
                         idx + 1,
@@ -654,6 +684,10 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                     )
                     return
                 if not planner.run(task_prompt=subtask.prompt):
+                    _log_hybrid_early_exit(
+                        "navigation planner returned failure",
+                        subtask_index=idx,
+                    )
                     logging.error(
                         "Replay navigation failed at subtask %d/%d; aborting.",
                         idx + 1,
@@ -704,6 +738,10 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                 environment.num_steps,
             )
             if environment.is_episode_complete() and idx + 1 < len(subtask_list):
+                _log_hybrid_early_exit(
+                    "replay dataset exhausted with remaining subtasks",
+                    subtask_index=idx,
+                )
                 logging.error(
                     "Replay dataset exhausted after subtask %d/%d; aborting remaining subtasks.",
                     idx + 1,
