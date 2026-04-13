@@ -398,6 +398,7 @@ class TestMainReplayIntegration:
                 recorded["closed"] = False
                 self._cursor = 0
                 self.num_steps = 10
+                self.fps = 25.0
                 self.front_camera_name = "cam_high"
                 self.camera_names = ("cam_high",)
                 self.predicted_actions: list[np.ndarray] = []
@@ -453,9 +454,10 @@ class TestMainReplayIntegration:
                 ]
 
         class FakeOfflineReplayNavigationPlanner:
-            def __init__(self, environment, _config) -> None:
+            def __init__(self, environment, _config, on_step_callback=None) -> None:
                 self.environment = environment
                 self.current_step = environment.get_cursor()
+                self.on_step_callback = on_step_callback
 
             def run(self, task_prompt: str) -> bool:
                 recorded.setdefault("navigate_starts", []).append((task_prompt, self.environment.get_cursor()))

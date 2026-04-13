@@ -61,9 +61,14 @@ def test_replay_navigation_only_falls_back_to_single_navigate_subtask(monkeypatc
             recorded["closed"] = False
             self.num_steps = 10
             self.front_camera_name = "cam_high"
+            self.camera_names = ("cam_high",)
+            self.fps = 25.0
 
         def close(self) -> None:
             recorded["closed"] = True
+
+        def get_cursor(self) -> int:
+            return 0
 
     class FakeTaskDecomposer:
         def __init__(self, _config) -> None:
@@ -73,8 +78,9 @@ def test_replay_navigation_only_falls_back_to_single_navigate_subtask(monkeypatc
             raise task_decomposer_mod.DecompositionError("empty subtasks")
 
     class FakeOfflineReplayNavigationPlanner:
-        def __init__(self, _environment, _config) -> None:
+        def __init__(self, _environment, _config, on_step_callback=None) -> None:
             self.current_step = 3
+            self.on_step_callback = on_step_callback
 
         def run(self, task_prompt: str) -> bool:
             recorded.setdefault("planner_prompts", []).append(task_prompt)
