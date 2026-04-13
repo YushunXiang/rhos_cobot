@@ -10,6 +10,7 @@ import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Sequence, TextIO
 
 import cv2
@@ -36,8 +37,21 @@ def _default_dump_jsonl(dataset_path: str) -> str:
 from examples.piper_real.planner_config import PlannerConfig
 from examples.piper_real.replay_env import ReplayEnvironment
 from examples.piper_real.replay_manipulation_planner import ReplayManipulationPromptPlanner
-from openpi.policies import policy_config as _policy_config
-from openpi.training import config as _config
+
+
+def _missing_openpi(*_args: Any, **_kwargs: Any) -> Any:
+    raise ModuleNotFoundError(
+        "openpi is required for replay progress runtime construction; "
+        "install the local openpi package or monkeypatch _config/_policy_config in tests"
+    )
+
+
+try:
+    from openpi.policies import policy_config as _policy_config
+    from openpi.training import config as _config
+except ModuleNotFoundError:
+    _policy_config = SimpleNamespace(create_trained_policy=_missing_openpi)
+    _config = SimpleNamespace(get_config=_missing_openpi)
 
 
 @dataclass(frozen=True)
