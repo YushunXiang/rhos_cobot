@@ -237,12 +237,17 @@ class ReplayEnvironment(_environment.Environment):
             self.predicted_action_steps.append(step_idx)
             self._last_observation_idx = None
             logging.info(
-                "Replay step %d — predicted action: %s",
+                "Replay step %d — predicted action: %s%s",
                 step_idx,
                 np.array2string(
                     np.asarray(action["actions"]),
                     precision=4,
                     suppress_small=True,
                     max_line_width=200,
+                ),
+                (
+                    ""
+                    if "progress" not in action
+                    else f", progress={float(np.asarray(action['progress'])):.4f}"
                 ),
             )

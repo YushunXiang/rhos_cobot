@@ -8,7 +8,6 @@ import json
 from typing import Any
 
 import cv2
-from openai import OpenAI
 
 from examples.piper_real.llm_utils import extract_message_json_text
 from examples.piper_real.planner_config import PlannerConfig
@@ -30,6 +29,8 @@ class ReplayManipulationPromptPlanner:
     """Use replay frames to periodically refine the manipulation prompt for pi0."""
 
     def __init__(self, replay_environment: ReplayEnvironment, config: PlannerConfig) -> None:
+        from openai import OpenAI
+
         self.replay_environment = replay_environment
         self.config = config
         self.client = OpenAI(base_url=config.base_url, api_key=config.api_key)

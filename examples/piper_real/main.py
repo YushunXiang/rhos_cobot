@@ -22,6 +22,48 @@ DEFAULT_REPLAY_MANIPULATE_REPLAN_INTERVAL_STEPS = 16
 _VALID_REPLAY_MODES = {"policy", "planner", "hybrid"}
 
 
+@dataclasses.dataclass(frozen=True)
+class ReplayProgressDecision:
+    event: str
+    progress: float
+    detail: str = ""
+
+
+class ReplayTaskProgressTracker:
+    def __init__(
+        self,
+        *,
+        complete_threshold: float,
+        stall_threshold: float,
+        stall_steps: int,
+        regression_threshold: float,
+    ) -> None:
+        self._complete_threshold = complete_threshold
+        self._stall_threshold = stall_threshold
+        self._stall_steps = stall_steps
+        self._regression_threshold = regression_threshold
+        self._values: list[float] = []
+        self._max_progress: float = 0.0
+
+    def observe(self, progress: float) -> ReplayProgressDecision:
+        value = float(progress)
+        self._values.append(value)
+        self._max_progress = max(self._max_progress, value)
+
+        if value >= self._complete_threshold:
+            return ReplayProgressDecision("complete", value, "progress threshold reached")
+
+        if value < self._max_progress - self._regression_threshold:
+            return ReplayProgressDecision("regression", value, "progress regressed")
+
+        if len(self._values) >= self._stall_steps:
+            window = self._values[-self._stall_steps :]
+            if max(window) - min(window) < self._stall_threshold:
+                return ReplayProgressDecision("stall", value, "progress stalled")
+
+        return ReplayProgressDecision("continue", value)
+
+
 @dataclasses.dataclass
 class Args:
     host: str = "10.42.0.2"  # H100
@@ -60,12 +102,14 @@ def _create_policy_agent(args: Args) -> _policy_agent.PolicyAgent:
     )
     metadata = ws_client_policy.get_server_metadata()
     logging.info("Server metadata: %s", metadata)
-    return _policy_agent.PolicyAgent(
+    agent = _policy_agent.PolicyAgent(
         policy=action_chunk_broker.ActionChunkBroker(
             policy=ws_client_policy,
             action_horizon=args.action_horizon,
         )
     )
+    agent.policy_metadata = metadata
+    return agent
 
 
 def _run_required_server_checks(
@@ -183,11 +227,23 @@ def _run_replay_manipulation_subtask(
     subtask_prompt: str,
     max_steps: int,
     replan_interval_steps: int,
+    progress_complete_threshold: float,
+    progress_stall_threshold: float,
+    progress_stall_steps: int,
+    progress_regression_threshold: float,
+    progress_confirm_with_replanner: bool,
     visualizer=None,
 ) -> dict[str, object]:
     prompt_history: list[dict[str, object]] = []
     current_policy_prompt = subtask_prompt
     prompt_queries = 0
+    has_progress_head = bool(getattr(agent, "policy_metadata", {}).get("has_progress_head", False))
+    progress_tracker = ReplayTaskProgressTracker(
+        complete_threshold=progress_complete_threshold,
+        stall_threshold=progress_stall_threshold,
+        stall_steps=progress_stall_steps,
+        regression_threshold=progress_regression_threshold,
+    )
 
     def _replan(policy_steps: int) -> bool:
         nonlocal current_policy_prompt
@@ -242,13 +298,17 @@ def _run_replay_manipulation_subtask(
         )
         return True
 
-    if not _replan(0):
-        return {
-            "executed_steps": 0,
-            "prompt_queries": prompt_queries,
-            "completed_by_replan": True,
-            "last_policy_prompt": current_policy_prompt,
-        }
+    if not has_progress_head:
+        if not _replan(0):
+            return {
+                "executed_steps": 0,
+                "prompt_queries": prompt_queries,
+                "completed_by_replan": True,
+                "completed_by_progress": False,
+                "last_policy_prompt": current_policy_prompt,
+            }
+    else:
+        logging.info("Replay manipulate subtask is using progress-first mode with replanner fallback.")
 
     executed_steps = 0
     while executed_steps < max_steps and not environment.is_episode_complete():
@@ -257,6 +317,7 @@ def _run_replay_manipulation_subtask(
         environment.apply_action(action)
         executed_steps += 1
 
+        progress_value = action.get("progress")
         if visualizer is not None:
             step_idx = environment.get_cursor() - 1
             if not visualizer.update(
@@ -268,8 +329,51 @@ def _run_replay_manipulation_subtask(
                 )
                 break
 
+        if has_progress_head and progress_value is not None:
+            decision = progress_tracker.observe(float(progress_value))
+            logging.info(
+                "Replay manipulate progress step %d: progress=%.4f event=%s",
+                executed_steps,
+                decision.progress,
+                decision.event,
+            )
+            if decision.event == "complete":
+                if not progress_confirm_with_replanner:
+                    return {
+                        "executed_steps": executed_steps,
+                        "prompt_queries": prompt_queries,
+                        "completed_by_replan": False,
+                        "completed_by_progress": True,
+                        "last_policy_prompt": current_policy_prompt,
+                    }
+                if not _replan(executed_steps):
+                    return {
+                        "executed_steps": executed_steps,
+                        "prompt_queries": prompt_queries,
+                        "completed_by_replan": True,
+                        "completed_by_progress": False,
+                        "last_policy_prompt": current_policy_prompt,
+                    }
+            elif decision.event in {"stall", "regression"}:
+                logging.warning(
+                    "Replay manipulate progress %s after %d policy steps at %.4f; falling back to replanner.",
+                    decision.event,
+                    executed_steps,
+                    decision.progress,
+                )
+                if not _replan(executed_steps):
+                    return {
+                        "executed_steps": executed_steps,
+                        "prompt_queries": prompt_queries,
+                        "completed_by_replan": True,
+                        "completed_by_progress": False,
+                        "last_policy_prompt": current_policy_prompt,
+                    }
+                continue
+
         if (
-            executed_steps < max_steps
+            not has_progress_head
+            and executed_steps < max_steps
             and not environment.is_episode_complete()
             and executed_steps % replan_interval_steps == 0
             and not _replan(executed_steps)
@@ -278,6 +382,23 @@ def _run_replay_manipulation_subtask(
                 "executed_steps": executed_steps,
                 "prompt_queries": prompt_queries,
                 "completed_by_replan": True,
+                "completed_by_progress": False,
+                "last_policy_prompt": current_policy_prompt,
+            }
+
+        if (
+            executed_steps < max_steps
+            and not environment.is_episode_complete()
+            and has_progress_head
+            and progress_value is None
+            and executed_steps % replan_interval_steps == 0
+            and not _replan(executed_steps)
+        ):
+            return {
+                "executed_steps": executed_steps,
+                "prompt_queries": prompt_queries,
+                "completed_by_replan": True,
+                "completed_by_progress": False,
                 "last_policy_prompt": current_policy_prompt,
             }
 
@@ -294,6 +415,7 @@ def _run_replay_manipulation_subtask(
         "executed_steps": executed_steps,
         "prompt_queries": prompt_queries,
         "completed_by_replan": False,
+        "completed_by_progress": False,
         "last_policy_prompt": current_policy_prompt,
     }
 
@@ -721,6 +843,11 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                 subtask_prompt=subtask.prompt,
                 max_steps=args.replay_manipulate_max_steps,
                 replan_interval_steps=args.replay_manipulate_replan_interval_steps,
+                progress_complete_threshold=args.planner.progress_complete_threshold,
+                progress_stall_threshold=args.planner.progress_stall_threshold,
+                progress_stall_steps=args.planner.progress_stall_steps,
+                progress_regression_threshold=args.planner.progress_regression_threshold,
+                progress_confirm_with_replanner=args.planner.progress_confirm_with_replanner,
                 visualizer=visualizer,
             )
             executed_steps = int(manipulation_result["executed_steps"])
@@ -950,6 +1077,7 @@ def main(args: Args) -> None:
                     ws_client_policy is not None
                 ), "manipulate subtask requires server connection"
                 environment.set_prompt(subtask.prompt)
+                # TODO: integrate progress-first logic (see replay/hybrid path)
                 runtime = _runtime.Runtime(
                     environment=environment,
                     agent=_policy_agent.PolicyAgent(
