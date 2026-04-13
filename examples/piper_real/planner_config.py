@@ -13,6 +13,11 @@ class PlannerConfig:
     max_linear_vel: float = 0.3
     max_angular_vel: float = 0.5
     default_duration: float = 1.5
+    progress_complete_threshold: float = 0.85
+    progress_stall_threshold: float = 0.02
+    progress_stall_steps: int = 3
+    progress_regression_threshold: float = 0.1
+    progress_confirm_with_replanner: bool = False
 
     def validate_motion_limits(self) -> None:
         if self.max_nav_steps <= 0:
@@ -33,6 +38,14 @@ class PlannerConfig:
             )
         if self.default_duration <= 0:
             raise ValueError("planner.default_duration must be positive")
+        if not 0.0 <= self.progress_complete_threshold <= 1.0:
+            raise ValueError("planner.progress_complete_threshold must be in [0, 1]")
+        if self.progress_stall_threshold < 0:
+            raise ValueError("planner.progress_stall_threshold must be non-negative")
+        if self.progress_stall_steps <= 0:
+            raise ValueError("planner.progress_stall_steps must be positive")
+        if self.progress_regression_threshold < 0:
+            raise ValueError("planner.progress_regression_threshold must be non-negative")
 
     def validate_service_config(self) -> None:
         if not self.base_url.strip():

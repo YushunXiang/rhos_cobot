@@ -6,7 +6,6 @@ import time
 from typing import Any
 
 import cv2
-from openai import OpenAI
 
 from examples.piper_real import base_safety
 from examples.piper_real.llm_utils import extract_message_json_text
@@ -19,6 +18,8 @@ class PlannerResponseError(RuntimeError):
 
 class LLMNavigationPlanner:
     def __init__(self, ros_operator: Any, config: PlannerConfig) -> None:
+        from openai import OpenAI
+
         self.ros_operator = ros_operator
         self.config = config
         self.client = OpenAI(base_url=config.base_url, api_key=config.api_key)
