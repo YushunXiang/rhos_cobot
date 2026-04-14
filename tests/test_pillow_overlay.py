@@ -282,3 +282,54 @@ def test_draw_marker_with_outline_adds_outline_pixels():
     arr = np.asarray(img)
     assert arr[:, :, 2].sum() > 0
     assert arr[15, 15, 0] == 255
+
+
+def test_new_overlay_is_transparent_rgba():
+    from rhos_cobot import pillow_overlay as po
+
+    overlay, draw = po.new_overlay((30, 20))
+    assert overlay.mode == "RGBA"
+    assert overlay.size == (30, 20)
+    assert overlay.getpixel((15, 10)) == (0, 0, 0, 0)
+    draw.rectangle((0, 0, 30, 20), fill=(255, 255, 255, 255))
+    assert overlay.getpixel((15, 10)) == (255, 255, 255, 255)
+
+
+def test_composite_overlay_leaves_uncovered_pixels_intact():
+    from rhos_cobot import pillow_overlay as po
+
+    frame = np.zeros((20, 20, 3), dtype=np.uint8)
+    frame[..., 1] = 255
+    overlay, draw = po.new_overlay((20, 20))
+    draw.rectangle((5, 5, 14, 14), fill=(255, 0, 0, 255))
+
+    result = po.composite_overlay_on_bgr(frame, overlay)
+    assert tuple(result[0, 0]) == (0, 255, 0)
+    assert tuple(result[10, 10]) == (0, 0, 255)
+
+
+def test_composite_overlay_blends_alpha():
+    from rhos_cobot import pillow_overlay as po
+
+    frame = np.zeros((20, 20, 3), dtype=np.uint8)
+    frame[..., 1] = 255
+    overlay, draw = po.new_overlay((20, 20))
+    draw.rectangle((5, 5, 14, 14), fill=(255, 0, 0, 128))
+
+    result = po.composite_overlay_on_bgr(frame, overlay)
+    c = result[10, 10]
+    assert c[0] == 0
+    assert 100 < c[1] < 200
+    assert 100 < c[2] < 200
+
+
+def test_composite_overlay_does_not_mutate_input_frame():
+    from rhos_cobot import pillow_overlay as po
+
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    frame[..., 1] = 200
+    frame_before = frame.copy()
+    overlay, draw = po.new_overlay((10, 10))
+    draw.rectangle((0, 0, 10, 10), fill=(255, 0, 0, 128))
+    po.composite_overlay_on_bgr(frame, overlay)
+    assert np.array_equal(frame, frame_before)

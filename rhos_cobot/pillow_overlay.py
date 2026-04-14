@@ -170,3 +170,16 @@ def draw_marker(
     draw.ellipse(bbox, fill=color)
     if outline is not None and outline_width > 0:
         draw.ellipse(bbox, outline=outline, width=outline_width)
+
+
+def new_overlay(size: tuple[int, int]) -> tuple[Image.Image, ImageDraw.ImageDraw]:
+    """Return a fully-transparent RGBA overlay and bound draw context."""
+    overlay = Image.new("RGBA", size, (0, 0, 0, 0))
+    return overlay, ImageDraw.Draw(overlay)
+
+
+def composite_overlay_on_bgr(frame: np.ndarray, overlay: Image.Image) -> np.ndarray:
+    """Alpha-composite an RGBA overlay onto a BGR frame."""
+    base = bgr_to_pil(frame).convert("RGBA")
+    composited = Image.alpha_composite(base, overlay).convert("RGB")
+    return pil_to_bgr(composited)
