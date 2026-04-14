@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 
@@ -104,3 +105,42 @@ def test_load_font_lru_cached(tmp_path: Path, monkeypatch):
     assert a is b
     assert a is not c
     assert len(calls) == 2
+
+
+def test_bgr_to_pil_color_swap():
+    from rhos_cobot import pillow_overlay as po
+
+    bgr = np.array([[[0, 0, 255]]], dtype=np.uint8)
+    pil = po.bgr_to_pil(bgr)
+    assert pil.size == (1, 1)
+    assert pil.mode == "RGB"
+    assert pil.getpixel((0, 0)) == (255, 0, 0)
+
+
+def test_pil_to_bgr_roundtrip():
+    from rhos_cobot import pillow_overlay as po
+
+    bgr = np.array([[[10, 20, 30], [40, 50, 60]]], dtype=np.uint8)
+    restored = po.pil_to_bgr(po.bgr_to_pil(bgr))
+    assert np.array_equal(restored, bgr)
+
+
+def test_bgr_to_pil_invalid_shape_raises():
+    from rhos_cobot import pillow_overlay as po
+
+    with pytest.raises(ValueError, match=r"expected \(H, W, 3\)"):
+        po.bgr_to_pil(np.zeros((3, 3), dtype=np.uint8))
+
+
+def test_bgr_to_pil_invalid_dtype_raises():
+    from rhos_cobot import pillow_overlay as po
+
+    with pytest.raises(ValueError, match="dtype"):
+        po.bgr_to_pil(np.zeros((2, 2, 3), dtype=np.float32))
+
+
+def test_bgr_to_pil_empty_shape_raises():
+    from rhos_cobot import pillow_overlay as po
+
+    with pytest.raises(ValueError, match="empty"):
+        po.bgr_to_pil(np.zeros((0, 2, 3), dtype=np.uint8))

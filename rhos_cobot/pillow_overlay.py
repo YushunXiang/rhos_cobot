@@ -12,7 +12,8 @@ import functools
 import os
 from pathlib import Path
 
-from PIL import ImageFont
+import numpy as np
+from PIL import Image, ImageFont
 
 
 _CJK_FONT_CANDIDATES: tuple[str, ...] = (
@@ -73,3 +74,20 @@ def resolve_font_path(user_path: Path | None = None) -> Path:
 def load_font(size: int, font_path: Path) -> ImageFont.FreeTypeFont:
     """Load a TrueType font at the given pixel size."""
     return ImageFont.truetype(str(font_path), size)
+
+
+def bgr_to_pil(frame: np.ndarray) -> Image.Image:
+    """Convert a BGR uint8 ndarray into an RGB PIL image."""
+    if frame.dtype != np.uint8:
+        raise ValueError(f"expected uint8 frame, got dtype={frame.dtype}")
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        raise ValueError(f"expected (H, W, 3) frame, got shape={frame.shape}")
+    if frame.shape[0] <= 0 or frame.shape[1] <= 0:
+        raise ValueError(f"empty frame: shape={frame.shape}")
+    return Image.fromarray(frame[..., ::-1].copy(), mode="RGB")
+
+
+def pil_to_bgr(image: Image.Image) -> np.ndarray:
+    """Convert a PIL image into a BGR uint8 ndarray."""
+    rgb = image.convert("RGB") if image.mode != "RGB" else image
+    return np.asarray(rgb)[..., ::-1].copy()
