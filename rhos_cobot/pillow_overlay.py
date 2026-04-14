@@ -8,8 +8,11 @@ for the full design.
 """
 from __future__ import annotations
 
+import functools
 import os
 from pathlib import Path
+
+from PIL import ImageFont
 
 
 _CJK_FONT_CANDIDATES: tuple[str, ...] = (
@@ -64,3 +67,9 @@ def resolve_font_path(user_path: Path | None = None) -> Path:
         f"(2) set ${_FONT_ENV_VAR}=/path/to/font.ttf, "
         "(3) pass --video-font-path on the CLI."
     )
+
+
+@functools.lru_cache(maxsize=32)
+def load_font(size: int, font_path: Path) -> ImageFont.FreeTypeFont:
+    """Load a TrueType font at the given pixel size."""
+    return ImageFont.truetype(str(font_path), size)

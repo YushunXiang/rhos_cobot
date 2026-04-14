@@ -79,3 +79,28 @@ def test_resolve_font_all_missing_raises(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(po, "_LATIN_FONT_CANDIDATES", (str(tmp_path / "b.ttf"),))
     with pytest.raises(po.FontUnavailableError, match="No usable font found"):
         po.resolve_font_path(None)
+
+
+def test_load_font_lru_cached(tmp_path: Path, monkeypatch):
+    from rhos_cobot import pillow_overlay as po
+
+    class FakeFont:
+        pass
+
+    calls: list[tuple[str, int]] = []
+
+    def fake_truetype(path, size):
+        calls.append((str(path), size))
+        return FakeFont()
+
+    monkeypatch.setattr(po.ImageFont, "truetype", fake_truetype)
+    po.load_font.cache_clear()
+
+    font_path = tmp_path / "fake.ttf"
+    a = po.load_font(14, font_path)
+    b = po.load_font(14, font_path)
+    c = po.load_font(18, font_path)
+
+    assert a is b
+    assert a is not c
+    assert len(calls) == 2
