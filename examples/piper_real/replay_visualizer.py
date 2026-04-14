@@ -15,10 +15,22 @@ import os
 import threading
 from functools import partial
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
+
+from rhos_cobot.pillow_overlay import (
+    FontUnavailableError,
+    _FONT_ENV_VAR,
+    composite_overlay_on_bgr,
+    draw_text_box,
+    load_font,
+    max_text_width,
+    new_overlay,
+    resolve_font_path,
+)
 
 if TYPE_CHECKING:
     from examples.piper_real.replay_env import ReplayEnvironment
@@ -241,6 +253,7 @@ class ReplayVisualizer:
         enabled: bool = True,
         port: int = _DEFAULT_PORT,
         save_path: str = "",
+        video_font_path: Path | None = None,
     ) -> None:
         self._env = environment
         self._enabled = enabled
@@ -251,6 +264,21 @@ class ReplayVisualizer:
         self._writer: cv2.VideoWriter | None = None
         self._writer_frame_size: tuple[int, int] | None = None
         self._video_fps = float(environment.fps) if environment.fps > 0 else 25.0
+        self._font_title = None
+        self._font_body = None
+        try:
+            font_path = resolve_font_path(video_font_path)
+            self._font_title = load_font(18, font_path)
+            self._font_body = load_font(14, font_path)
+        except FontUnavailableError as exc:
+            logging.warning(
+                "!!! Replay visualizer: no usable font found — HUD overlay "
+                "is DISABLED for the recorded video (web UI is unaffected). "
+                "To enable HUD: install fonts-noto-cjk, set $%s, or pass "
+                "video_font_path=. (%s)",
+                _FONT_ENV_VAR,
+                exc,
+            )
 
         # Shared state (protected by lock)
         self._lock = threading.Lock()
@@ -377,146 +405,64 @@ class ReplayVisualizer:
             x0 = c * tile_w
             canvas[y0 : y0 + tile_h, x0 : x0 + tile_w] = frame
 
+        if self._font_title is None or self._font_body is None:
+            return canvas
+
         title = f"Replay step {step_idx + 1}/{self._total_steps}"
         subtask = f"Subtask {subtask_idx}/{total_subtasks} [{subtask_type}]"
-        prompt = f"Prompt: {subtask_prompt}"[:200]
-        info = f"Info: {extra_info}"[:200] if extra_info else ""
+        prompt_line = f"Prompt: {subtask_prompt}"[:200]
+        info_line = f"Info: {extra_info}"[:200] if extra_info else ""
 
-        overlay_specs = [
-            (title, 0.50, 1, (245, 245, 245), (8, 5), 30),
-            (subtask, 0.43, 1, (185, 228, 255), (8, 4), 54),
-            (prompt, 0.60, 1, (224, 224, 224), (8, 5), 84),
-            (info, 0.56, 1, (166, 210, 255), (8, 5), 112),
-        ]
-        box_width = self._get_uniform_overlay_box_width(canvas, overlay_specs)
+        overlay, draw = new_overlay((canvas.shape[1], canvas.shape[0]))
+        candidate_texts = [title, subtask, prompt_line]
+        if info_line:
+            candidate_texts.append(info_line)
+        box_width = max_text_width(draw, self._font_body, candidate_texts, padding_x=8)
+        box_width = max(box_width, 220)
+        box_width = min(box_width, max(220, canvas.shape[1] - 24))
 
-        self._draw_text_with_background(
-            canvas,
+        draw_text_box(
+            draw,
+            (16, 22),
             title,
-            org=(16, 30),
-            font_scale=0.50,
-            text_color=(245, 245, 245),
-            thickness=1,
-            bg_color=(96, 96, 96),
-            bg_alpha=0.48,
+            self._font_title,
             padding=(8, 5),
+            fg=(245, 245, 245, 255),
+            bg=(96, 96, 96, 122),
             box_width=box_width,
         )
-        self._draw_text_with_background(
-            canvas,
+        draw_text_box(
+            draw,
+            (16, 52),
             subtask,
-            org=(16, 58),
-            font_scale=0.43,
-            text_color=(185, 228, 255),
-            thickness=1,
-            bg_color=(96, 96, 96),
-            bg_alpha=0.48,
+            self._font_body,
             padding=(8, 4),
+            fg=(185, 228, 255, 255),
+            bg=(96, 96, 96, 122),
             box_width=box_width,
         )
-        self._draw_text_with_background(
-            canvas,
-            prompt,
-            org=(16, 84),
-            font_scale=0.60,
-            text_color=(224, 224, 224),
-            thickness=1,
-            bg_color=(96, 96, 96),
-            bg_alpha=0.46,
+        draw_text_box(
+            draw,
+            (16, 80),
+            prompt_line,
+            self._font_body,
             padding=(8, 5),
+            fg=(224, 224, 224, 255),
+            bg=(96, 96, 96, 118),
             box_width=box_width,
         )
         if extra_info:
-            self._draw_text_with_background(
-                canvas,
-                info,
-                org=(16, 108),
-                font_scale=0.56,
-                text_color=(166, 210, 255),
-                thickness=1,
-                bg_color=(96, 96, 96),
-                bg_alpha=0.46,
+            draw_text_box(
+                draw,
+                (16, 108),
+                info_line,
+                self._font_body,
                 padding=(8, 5),
+                fg=(166, 210, 255, 255),
+                bg=(96, 96, 96, 118),
                 box_width=box_width,
             )
-        return canvas
-
-    def _get_uniform_overlay_box_width(
-        self,
-        image: np.ndarray,
-        specs: list[tuple[str, float, int, tuple[int, int, int], tuple[int, int], int]],
-    ) -> int:
-        font = cv2.FONT_HERSHEY_DUPLEX
-        max_width = 0
-        for text, font_scale, thickness, _, padding, _ in specs:
-            if not text:
-                continue
-            (text_w, _), _ = cv2.getTextSize(text, font, font_scale, thickness)
-            pad_x, _ = padding
-            max_width = max(max_width, text_w + 2 * pad_x)
-        if max_width <= 0:
-            return 220
-        return min(max_width, max(220, image.shape[1] - 24))
-
-    def _draw_translucent_rect(
-        self,
-        image: np.ndarray,
-        *,
-        top_left: tuple[int, int],
-        bottom_right: tuple[int, int],
-        color: tuple[int, int, int],
-        alpha: float,
-    ) -> None:
-        x0, y0 = top_left
-        x1, y1 = bottom_right
-        x0 = max(0, min(x0, image.shape[1] - 1))
-        x1 = max(0, min(x1, image.shape[1]))
-        y0 = max(0, min(y0, image.shape[0] - 1))
-        y1 = max(0, min(y1, image.shape[0]))
-        if x1 <= x0 or y1 <= y0:
-            return
-        roi = image[y0:y1, x0:x1]
-        overlay = np.full_like(roi, color, dtype=np.uint8)
-        cv2.addWeighted(overlay, alpha, roi, 1.0 - alpha, 0.0, dst=roi)
-
-    def _draw_text_with_background(
-        self,
-        image: np.ndarray,
-        text: str,
-        *,
-        org: tuple[int, int],
-        font_scale: float,
-        text_color: tuple[int, int, int],
-        thickness: int,
-        bg_color: tuple[int, int, int],
-        bg_alpha: float,
-        padding: tuple[int, int],
-        box_width: int | None = None,
-    ) -> None:
-        if not text:
-            return
-        font = cv2.FONT_HERSHEY_DUPLEX
-        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-        x, y = org
-        pad_x, pad_y = padding
-        rect_width = box_width if box_width is not None else (text_w + 2 * pad_x)
-        self._draw_translucent_rect(
-            image,
-            top_left=(x - pad_x, y - text_h - pad_y),
-            bottom_right=(x - pad_x + rect_width, y + baseline + pad_y),
-            color=bg_color,
-            alpha=bg_alpha,
-        )
-        cv2.putText(
-            image,
-            text,
-            (x, y),
-            font,
-            font_scale,
-            text_color,
-            thickness,
-            cv2.LINE_AA,
-        )
+        return composite_overlay_on_bgr(canvas, overlay)
 
     def _write_video_frame(self, frame: np.ndarray) -> None:
         h, w = frame.shape[:2]
