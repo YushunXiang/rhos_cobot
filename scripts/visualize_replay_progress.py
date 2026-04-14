@@ -15,6 +15,17 @@ from typing import Any, Callable, Sequence, TextIO
 
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+from rhos_cobot.pillow_overlay import (
+    bgr_to_pil,
+    draw_marker,
+    draw_polyline,
+    draw_text_box,
+    load_font,
+    pil_to_bgr,
+    resolve_font_path,
+)
 
 
 def _log(msg: str) -> None:
@@ -108,6 +119,7 @@ class Args:
     camera_name: str = "cam_high"
     task_decompose: bool = False
     no_replanner: bool = False
+    video_font_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +148,7 @@ class ReplayProgressVisualizationConfig:
     camera_name: str
     task_decompose: bool
     no_replanner: bool = False
+    video_font_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -236,64 +249,65 @@ def _clamp_index(index: int, size: int) -> int:
 
 
 def _marker_color(record: StepRecord) -> tuple[int, int, int]:
+    # RGB palette for Pillow drawing.
     if record.progress_event == "complete" or record.completed:
         return (80, 220, 80)
     if record.progress_event == "stall":
-        return (0, 180, 255)
+        return (255, 180, 0)
     if record.progress_event == "regression":
-        return (60, 60, 255)
+        return (255, 60, 60)
     if record.replanner_called:
         if record.replanner_action == "complete":
-            return (255, 220, 80)
+            return (80, 220, 255)
         if record.replanner_action == "continue":
-            return (255, 170, 0)
+            return (0, 170, 255)
         if record.replanner_action == "error":
             return (255, 80, 255)
     return (160, 220, 160)
 
 
 def _write_status_lines(
-    canvas: np.ndarray,
+    canvas_pil: Image.Image,
     *,
     origin_x: int,
     origin_y: int,
     width: int,
     record: StepRecord,
+    font_body: ImageFont.FreeTypeFont,
+    font_small: ImageFont.FreeTypeFont,
 ) -> None:
-    font = cv2.FONT_HERSHEY_SIMPLEX
+    draw = ImageDraw.Draw(canvas_pil)
     color = (245, 245, 245)
     small_color = (210, 210, 210)
     y = origin_y + 28
     line_step = 28
 
-    def draw(label: str, value: str, *, scale: float = 0.6, thickness: int = 1, use_small: bool = False) -> None:
+    def _draw(label: str, value: str, *, use_small: bool = False) -> None:
         nonlocal y
         text = f"{label}: {value}"
         max_chars = max(12, int(width / 12))
         for line in textwrap.wrap(text, width=max_chars) or [""]:
-            cv2.putText(
-                canvas,
-                line,
+            draw_text_box(
+                draw,
                 (origin_x + 12, y),
-                font,
-                scale,
-                small_color if use_small else color,
-                thickness,
-                cv2.LINE_AA,
+                line,
+                font_small if use_small else font_body,
+                padding=(0, 0),
+                fg=small_color if use_small else color,
             )
             y += line_step
 
-    draw("prompt", record.prompt)
-    draw("step", str(record.step))
-    draw("progress", f"{record.progress:.3f}")
-    draw("event", record.progress_event)
-    draw("trigger", record.trigger_reason or "-", scale=0.52, use_small=True)
-    replanner_value = "called"
-    if record.replanner_called:
-        replanner_value = f"{record.replanner_action or '-'} | {record.replanner_reason or '-'}"
-    else:
-        replanner_value = "not called"
-    draw("replanner", replanner_value, scale=0.52, use_small=True)
+    _draw("prompt", record.prompt)
+    _draw("step", str(record.step))
+    _draw("progress", f"{record.progress:.3f}")
+    _draw("event", record.progress_event)
+    _draw("trigger", record.trigger_reason or "-", use_small=True)
+    replanner_value = (
+        f"{record.replanner_action or '-'} | {record.replanner_reason or '-'}"
+        if record.replanner_called
+        else "not called"
+    )
+    _draw("replanner", replanner_value, use_small=True)
 
 
 def compose_frame(
@@ -301,6 +315,10 @@ def compose_frame(
     records: Sequence[StepRecord],
     current_index: int,
     complete_threshold: float,
+    *,
+    font_body: ImageFont.FreeTypeFont | None = None,
+    font_small: ImageFont.FreeTypeFont | None = None,
+    video_font_path: Path | None = None,
 ) -> np.ndarray:
     if frame.ndim != 3 or frame.shape[2] != 3:
         raise ValueError("frame must be a BGR image with shape (H, W, 3)")
@@ -329,12 +347,24 @@ def compose_frame(
     cv2.rectangle(canvas, (frame_w, 0), (canvas_w - 1, frame_h - 1), (70, 70, 70), 1)
     cv2.rectangle(canvas, (0, frame_h), (canvas_w - 1, canvas_h - 1), (70, 70, 70), 1)
 
+    if font_body is None or font_small is None:
+        font_path = resolve_font_path(video_font_path)
+        if font_body is None:
+            font_body = load_font(16, font_path)
+        if font_small is None:
+            font_small = load_font(13, font_path)
+
+    canvas_pil = bgr_to_pil(canvas)
+    draw = ImageDraw.Draw(canvas_pil)
+
     _write_status_lines(
-        canvas,
+        canvas_pil,
         origin_x=frame_w,
         origin_y=0,
         width=status_width,
         record=current,
+        font_body=font_body,
+        font_small=font_small,
     )
 
     plot_x0 = 18
@@ -344,33 +374,34 @@ def compose_frame(
     plot_x1 = plot_x0 + plot_w
     plot_y1 = plot_y0 + plot_h
 
-    cv2.putText(
-        canvas,
-        "progress history",
+    draw_text_box(
+        draw,
         (plot_x0, frame_h + 18),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        (225, 225, 225),
-        1,
-        cv2.LINE_AA,
+        "progress history",
+        font_body,
+        padding=(0, 0),
+        fg=(225, 225, 225),
     )
 
     threshold_y = plot_y0 + int(round((1.0 - complete_threshold) * max(plot_h - 1, 1)))
-    cv2.line(canvas, (plot_x0, threshold_y), (plot_x1, threshold_y), (0, 220, 220), 1, cv2.LINE_AA)
-    cv2.putText(
-        canvas,
+    draw.line([(plot_x0, threshold_y), (plot_x1, threshold_y)], fill=(0, 220, 220), width=1)
+    draw_text_box(
+        draw,
+        (plot_x0 + 6, max(plot_y0 - 22, 2)),
         f"complete >= {complete_threshold:.2f}",
-        (plot_x0 + 6, max(plot_y0 - 6, 12)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (0, 220, 220),
-        1,
-        cv2.LINE_AA,
+        font_small,
+        padding=(0, 0),
+        fg=(0, 220, 220),
     )
 
     history = list(records[: current_index + 1])
     if len(history) == 1:
-        points = [(plot_x0 + plot_w // 2, plot_y0 + int((1.0 - history[0].progress) * max(plot_h - 1, 1)))]
+        points = [
+            (
+                plot_x0 + plot_w // 2,
+                plot_y0 + int((1.0 - history[0].progress) * max(plot_h - 1, 1)),
+            )
+        ]
     else:
         points = []
         for idx, record in enumerate(history):
@@ -378,17 +409,22 @@ def compose_frame(
             y = plot_y0 + int(round((1.0 - record.progress) * max(plot_h - 1, 1)))
             points.append((x, y))
 
-    for p0, p1 in zip(points, points[1:]):
-        cv2.line(canvas, p0, p1, (90, 180, 90), 2, cv2.LINE_AA)
+    draw_polyline(draw, points, color=(90, 180, 90), width=2)
 
     for idx, record in enumerate(history):
-        point = points[idx]
-        cv2.circle(canvas, point, 4, _marker_color(record), -1, cv2.LINE_AA)
+        draw_marker(draw, points[idx], color=_marker_color(record), radius=4)
 
-    cv2.circle(canvas, points[-1], 7, (255, 255, 255), 1, cv2.LINE_AA)
-    cv2.rectangle(canvas, (plot_x0, plot_y0), (plot_x1, plot_y1), (100, 100, 100), 1)
+    draw_marker(
+        draw,
+        points[-1],
+        color=(255, 255, 255),
+        radius=7,
+        outline=(255, 255, 255),
+        outline_width=1,
+    )
+    draw.rectangle((plot_x0, plot_y0, plot_x1, plot_y1), outline=(100, 100, 100), width=1)
 
-    return canvas
+    return pil_to_bgr(canvas_pil)
 
 
 @dataclass(frozen=True)
@@ -604,6 +640,7 @@ def render_replay_visualization(
     output_video: Path,
     dump_jsonl: Path | None = None,
     fps: float = 25.0,
+    video_font_path: Path | None = None,
 ) -> list[StepRecord]:
     jsonl_recorder = JsonlRecorder(dump_jsonl) if dump_jsonl is not None else None
     try:
@@ -623,6 +660,9 @@ def render_replay_visualization(
             raise AttributeError("environment does not provide get_image")
 
         camera_name = runtime.run_config.camera_name
+        font_path = resolve_font_path(video_font_path)
+        font_body = load_font(16, font_path)
+        font_small = load_font(13, font_path)
         first_frame = get_image(camera_name, records[0].step)
         if first_frame is None:
             raise ValueError("environment returned no frame")
@@ -631,6 +671,8 @@ def render_replay_visualization(
             records,
             0,
             runtime.run_config.complete_threshold,
+            font_body=font_body,
+            font_small=font_small,
         )
 
         video_sink = open_video_writer(
@@ -651,6 +693,8 @@ def render_replay_visualization(
                         records,
                         index,
                         runtime.run_config.complete_threshold,
+                        font_body=font_body,
+                        font_small=font_small,
                     )
                 )
         finally:
@@ -696,6 +740,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip LLM replanner entirely (diagnose raw progress head only).",
     )
+    parser.add_argument(
+        "--video-font-path",
+        default=None,
+        type=Path,
+        help="Path to a TrueType font for overlay text. Default: auto-discover "
+        "CJK -> Latin, or honor $RHOS_COBOT_VIDEO_FONT.",
+    )
     return parser
 
 
@@ -719,6 +770,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Args:
         camera_name=ns.camera_name,
         task_decompose=ns.task_decompose,
         no_replanner=ns.no_replanner,
+        video_font_path=ns.video_font_path,
     )
 
 
@@ -883,6 +935,7 @@ def build_config(args: Args) -> ReplayProgressVisualizationConfig:
         camera_name=args.camera_name,
         task_decompose=args.task_decompose,
         no_replanner=args.no_replanner,
+        video_font_path=args.video_font_path,
     )
 
 
@@ -895,6 +948,7 @@ def main(argv: Sequence[str] | Args | None = None) -> int:
             runtime,
             output_video=config.output_video,
             dump_jsonl=config.dump_jsonl,
+            video_font_path=config.video_font_path,
         )
     finally:
         close = getattr(runtime.env, "close", None)

@@ -73,6 +73,27 @@ def test_parse_args_accepts_required_and_optional_flags():
     assert ns.task_decompose is True
 
 
+def test_parse_args_accepts_video_font_path_flag():
+    from scripts.visualize_replay_progress import parse_args
+
+    args = parse_args(
+        [
+            "--dataset-path",
+            "/tmp/episode.hdf5",
+            "--checkpoint-dir",
+            "/tmp/checkpoint",
+            "--output-video",
+            "/tmp/output.mp4",
+            "--prompt",
+            "pick up the red cup",
+            "--video-font-path",
+            "/tmp/font.ttf",
+        ]
+    )
+
+    assert args.video_font_path == Path("/tmp/font.ttf")
+
+
 def test_validate_args_rejects_missing_dataset_path(tmp_path: Path):
     from scripts.visualize_replay_progress import validate_args
 
@@ -169,6 +190,25 @@ def test_build_config_normalizes_paths_after_validation(tmp_path: Path):
     assert config.dump_jsonl == tmp_path / "trace.jsonl"
     assert config.camera_name == "cam_wrist"
     assert config.task_decompose is False
+
+
+def test_build_config_preserves_video_font_path(tmp_path: Path):
+    from scripts.visualize_replay_progress import build_config
+
+    dataset_path = tmp_path / "episode.hdf5"
+    dataset_path.write_bytes(b"stub")
+    checkpoint_dir = _make_checkpoint(tmp_path, has_progress_head=True)
+    font_path = tmp_path / "font.ttf"
+    font_path.write_bytes(b"stub")
+    args = _make_args(
+        tmp_path,
+        checkpoint_dir=checkpoint_dir,
+        video_font_path=font_path,
+    )
+
+    config = build_config(args)
+
+    assert config.video_font_path == font_path
 
 
 def test_step_record_exposes_expected_jsonl_fields():
@@ -548,6 +588,43 @@ def test_compose_frame_draws_complete_threshold_line():
     assert np.any(canvas[progress_pane_y, : frame.shape[1]] != 0)
 
 
+def test_compose_frame_accepts_custom_font_path_via_env(tmp_path: Path, monkeypatch):
+    """compose_frame must honor $RHOS_COBOT_VIDEO_FONT when no explicit font is passed."""
+    import numpy as np
+
+    from scripts.visualize_replay_progress import StepRecord, compose_frame
+
+    dejavu = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+    if not dejavu.is_file():
+        pytest.skip("DejaVuSans not available on this host")
+    monkeypatch.setenv("RHOS_COBOT_VIDEO_FONT", str(dejavu))
+
+    frame = np.zeros((80, 120, 3), dtype=np.uint8)
+    records = [
+        StepRecord(
+            step=0,
+            prompt="p",
+            progress=0.4,
+            progress_event="continue",
+            trigger_reason="",
+            replanner_called=False,
+            replanner_action="",
+            replanner_reason="",
+            completed=False,
+            camera_name="cam_high",
+        )
+    ]
+
+    canvas = compose_frame(
+        frame=frame,
+        records=records,
+        current_index=0,
+        complete_threshold=0.85,
+    )
+    assert canvas.ndim == 3 and canvas.shape[2] == 3
+    assert np.any(canvas != 0)
+
+
 def test_build_runtime_wires_replay_environment_policy_and_planner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     from types import SimpleNamespace
 
@@ -670,11 +747,12 @@ def test_main_wires_cli_config_runtime_render_and_cleanup(monkeypatch: pytest.Mo
         observed["config"] = config_arg
         return runtime
 
-    def fake_render(runtime_arg, *, output_video, dump_jsonl):
+    def fake_render(runtime_arg, *, output_video, dump_jsonl, video_font_path=None):
         observed["render"] = {
             "runtime": runtime_arg,
             "output_video": output_video,
             "dump_jsonl": dump_jsonl,
+            "video_font_path": video_font_path,
         }
         return []
 
@@ -710,6 +788,7 @@ def test_main_wires_cli_config_runtime_render_and_cleanup(monkeypatch: pytest.Mo
         "runtime": runtime,
         "output_video": config.output_video,
         "dump_jsonl": config.dump_jsonl,
+        "video_font_path": config.video_font_path,
     }
     assert observed["env_closed"] is True
 
