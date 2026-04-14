@@ -53,3 +53,22 @@ def test_prepare_frame_for_output_keeps_bgr_frames(monkeypatch):
     converted = module._prepare_frame_for_output(bgr_frame, input_color_space="bgr")
 
     np.testing.assert_array_equal(converted, bgr_frame)
+
+
+def test_annotate_tile_writes_label_with_black_background(monkeypatch):
+    """The new helper must paint a black bg strip and white label text."""
+    module = _load_module(monkeypatch)
+
+    from PIL import ImageFont
+
+    font = ImageFont.load_default()
+    tile = np.full((80, 160, 3), 200, dtype=np.uint8)
+
+    out = module._annotate_tile(tile, "frame 5  t=0.2s", font, tile_width=160)
+
+    assert out.shape == tile.shape
+    assert out.dtype == np.uint8
+    top_band = out[:28]
+    assert (top_band.sum(axis=-1) == 0).any()
+    assert (top_band.sum(axis=-1) >= 3 * 250).any()
+    np.testing.assert_array_equal(out[40:], tile[40:])

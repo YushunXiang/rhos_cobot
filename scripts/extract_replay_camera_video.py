@@ -9,6 +9,15 @@ from pathlib import Path
 import cv2
 import h5py
 import numpy as np
+from PIL import ImageFont
+
+from rhos_cobot.pillow_overlay import (
+    bgr_to_pil,
+    draw_text_box,
+    load_font,
+    pil_to_bgr,
+    resolve_font_path,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -58,6 +67,13 @@ def _parse_args() -> argparse.Namespace:
             "Default: rgb"
         ),
     )
+    parser.add_argument(
+        "--video-font-path",
+        default=None,
+        type=Path,
+        help="Path to a TrueType font for tile labels. If omitted, auto-discover "
+        "CJK -> Latin system fonts, or honor $RHOS_COBOT_VIDEO_FONT.",
+    )
     return parser.parse_args()
 
 
@@ -85,6 +101,31 @@ def _prepare_frame_for_output(frame: np.ndarray, *, input_color_space: str) -> n
     return frame
 
 
+def _annotate_tile(
+    tile: np.ndarray,
+    label: str,
+    font: ImageFont.FreeTypeFont,
+    *,
+    tile_width: int,
+) -> np.ndarray:
+    """Paint a black header strip and white label text on a contact-sheet tile."""
+    pil_tile = bgr_to_pil(tile)
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(pil_tile)
+    draw_text_box(
+        draw,
+        (8, 6),
+        label,
+        font,
+        padding=(6, 4),
+        fg=(255, 255, 255),
+        bg=(0, 0, 0),
+        box_width=tile_width,
+    )
+    return pil_to_bgr(pil_tile)
+
+
 def main() -> int:
     args = _parse_args()
     dataset_path = Path(args.dataset_path).expanduser().resolve()
@@ -97,6 +138,8 @@ def main() -> int:
 
     video_path = output_dir / f"{dataset_path.stem}_{args.camera}.mp4"
     contact_path = output_dir / f"{dataset_path.stem}_{args.camera}_contact_{args.samples}.jpg"
+    font_path = resolve_font_path(args.video_font_path)
+    tile_font = load_font(18, font_path)
 
     with h5py.File(dataset_path, "r") as handle:
         images_group = handle["/observations/images"]
@@ -139,17 +182,7 @@ def main() -> int:
             frame = _prepare_frame_for_output(frame, input_color_space=args.input_color_space)
             frame = cv2.resize(frame, (args.tile_width, args.tile_height))
             label = f"frame {frame_idx}  t={frame_idx / fps:.1f}s"
-            cv2.rectangle(frame, (0, 0), (args.tile_width, 28), (0, 0, 0), -1)
-            cv2.putText(
-                frame,
-                label,
-                (8, 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
+            frame = _annotate_tile(frame, label, tile_font, tile_width=args.tile_width)
             tiles.append(frame)
 
     rows: list[np.ndarray] = []
