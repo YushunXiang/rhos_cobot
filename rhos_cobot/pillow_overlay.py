@@ -11,7 +11,7 @@ from __future__ import annotations
 import functools
 import os
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -140,3 +140,33 @@ def draw_text_box(
             draw.rectangle((x0, y0, x1, y1), fill=bg)
     draw.text((x, y), text, font=font, fill=fg)
     return (x0, y0, x1, y1)
+
+
+def draw_polyline(
+    draw: ImageDraw.ImageDraw,
+    points: Sequence[tuple[int, int]],
+    *,
+    color: tuple[int, ...],
+    width: int = 2,
+) -> None:
+    """Draw a polyline through points."""
+    if len(points) < 2:
+        return
+    draw.line(list(points), fill=color, width=width, joint="curve")
+
+
+def draw_marker(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    *,
+    color: tuple[int, ...],
+    radius: int,
+    outline: tuple[int, ...] | None = None,
+    outline_width: int = 0,
+) -> None:
+    """Draw a filled circle with an optional outline."""
+    x, y = xy
+    bbox = (x - radius, y - radius, x + radius, y + radius)
+    draw.ellipse(bbox, fill=color)
+    if outline is not None and outline_width > 0:
+        draw.ellipse(bbox, outline=outline, width=outline_width)

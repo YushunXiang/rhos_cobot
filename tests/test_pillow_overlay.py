@@ -223,3 +223,62 @@ def test_max_text_width_ignores_empty_strings():
     img = Image.new("RGB", (100, 40))
     draw = ImageDraw.Draw(img)
     assert po.max_text_width(draw, _default_font(), ["", ""], padding_x=4) == 0
+
+
+def test_draw_polyline_renders():
+    from rhos_cobot import pillow_overlay as po
+
+    img = Image.new("RGB", (40, 40), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    po.draw_polyline(draw, [(5, 5), (35, 35)], color=(0, 255, 0), width=2)
+    arr = np.asarray(img)
+    assert arr[:, :, 1].sum() > 0
+    assert arr[:, :, 0].sum() == 0
+    assert arr[:, :, 2].sum() == 0
+
+
+def test_draw_polyline_single_point_is_noop():
+    from rhos_cobot import pillow_overlay as po
+
+    img = Image.new("RGB", (10, 10), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    po.draw_polyline(draw, [(5, 5)], color=(255, 0, 0), width=2)
+    assert np.asarray(img).sum() == 0
+
+
+def test_draw_polyline_empty_is_noop():
+    from rhos_cobot import pillow_overlay as po
+
+    img = Image.new("RGB", (10, 10), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    po.draw_polyline(draw, [], color=(255, 0, 0), width=2)
+    assert np.asarray(img).sum() == 0
+
+
+def test_draw_marker_fills_center():
+    from rhos_cobot import pillow_overlay as po
+
+    img = Image.new("RGB", (20, 20), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    po.draw_marker(draw, (10, 10), color=(255, 0, 0), radius=4)
+    arr = np.asarray(img)
+    assert arr[10, 10, 0] == 255
+    assert arr[0, 0].sum() == 0
+
+
+def test_draw_marker_with_outline_adds_outline_pixels():
+    from rhos_cobot import pillow_overlay as po
+
+    img = Image.new("RGB", (30, 30), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    po.draw_marker(
+        draw,
+        (15, 15),
+        color=(255, 0, 0),
+        radius=5,
+        outline=(0, 0, 255),
+        outline_width=2,
+    )
+    arr = np.asarray(img)
+    assert arr[:, :, 2].sum() > 0
+    assert arr[15, 15, 0] == 255
