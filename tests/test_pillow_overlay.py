@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from PIL import Image, ImageDraw, ImageFont
 
 
 def test_module_exports_font_unavailable_error():
@@ -144,3 +145,81 @@ def test_bgr_to_pil_empty_shape_raises():
 
     with pytest.raises(ValueError, match="empty"):
         po.bgr_to_pil(np.zeros((0, 2, 3), dtype=np.uint8))
+
+
+def _default_font():
+    return ImageFont.load_default()
+
+
+def test_draw_text_box_writes_pixels():
+    from rhos_cobot import pillow_overlay as po
+
+    img = Image.new("RGB", (200, 80), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    po.draw_text_box(draw, (10, 30), "HELLO", _default_font(), fg=(255, 255, 255))
+    assert np.asarray(img).sum() > 0
+
+
+def test_draw_text_box_returns_bbox_within_image():
+    from rhos_cobot import pillow_overlay as po
+
+    img = Image.new("RGB", (200, 80), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    bbox = po.draw_text_box(draw, (10, 20), "X", _default_font())
+    x0, y0, x1, y1 = bbox
+    assert x0 < x1
+    assert y0 < y1
+    assert 0 <= x0 and x1 <= 200
+    assert y1 <= 80
+
+
+def test_draw_text_box_uniform_box_width():
+    from rhos_cobot import pillow_overlay as po
+
+    img = Image.new("RGB", (300, 80), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    bbox = po.draw_text_box(
+        draw,
+        (10, 20),
+        "x",
+        _default_font(),
+        bg=(50, 50, 50),
+        box_width=200,
+    )
+    assert bbox[2] - bbox[0] == 200
+
+
+def test_draw_text_box_with_bg_paints_background():
+    from rhos_cobot import pillow_overlay as po
+
+    img = Image.new("RGB", (100, 40), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    po.draw_text_box(
+        draw,
+        (10, 15),
+        "Y",
+        _default_font(),
+        fg=(255, 255, 255),
+        bg=(40, 80, 160),
+    )
+    arr = np.asarray(img)
+    blue_pixels = np.all(arr == (40, 80, 160), axis=-1)
+    assert blue_pixels.any()
+
+
+def test_max_text_width_returns_widest():
+    from rhos_cobot import pillow_overlay as po
+
+    img = Image.new("RGB", (300, 80))
+    draw = ImageDraw.Draw(img)
+    wide = po.max_text_width(draw, _default_font(), ["a", "longer string", "b"], padding_x=4)
+    short = po.max_text_width(draw, _default_font(), ["a"], padding_x=4)
+    assert wide > short
+
+
+def test_max_text_width_ignores_empty_strings():
+    from rhos_cobot import pillow_overlay as po
+
+    img = Image.new("RGB", (100, 40))
+    draw = ImageDraw.Draw(img)
+    assert po.max_text_width(draw, _default_font(), ["", ""], padding_x=4) == 0

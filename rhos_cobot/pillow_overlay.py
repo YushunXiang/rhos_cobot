@@ -11,9 +11,10 @@ from __future__ import annotations
 import functools
 import os
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
-from PIL import Image, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
 
 _CJK_FONT_CANDIDATES: tuple[str, ...] = (
@@ -91,3 +92,51 @@ def pil_to_bgr(image: Image.Image) -> np.ndarray:
     """Convert a PIL image into a BGR uint8 ndarray."""
     rgb = image.convert("RGB") if image.mode != "RGB" else image
     return np.asarray(rgb)[..., ::-1].copy()
+
+
+def max_text_width(
+    draw: ImageDraw.ImageDraw,
+    font: ImageFont.FreeTypeFont,
+    texts: Iterable[str],
+    *,
+    padding_x: int,
+) -> int:
+    """Return max(text_width + 2*padding_x) across non-empty texts."""
+    widest = 0
+    for text in texts:
+        if not text:
+            continue
+        bbox = draw.textbbox((0, 0), text, font=font)
+        widest = max(widest, (bbox[2] - bbox[0]) + 2 * padding_x)
+    return widest
+
+
+def draw_text_box(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    *,
+    padding: tuple[int, int] = (8, 5),
+    fg: tuple[int, ...] = (245, 245, 245),
+    bg: tuple[int, ...] | None = None,
+    radius: int = 0,
+    box_width: int | None = None,
+) -> tuple[int, int, int, int]:
+    """Draw text and an optional background box, returning its bbox."""
+    x, y = xy
+    pad_x, pad_y = padding
+    text_bbox = draw.textbbox((x, y), text, font=font)
+    text_w = text_bbox[2] - text_bbox[0]
+    rect_width = box_width if box_width is not None else (text_w + 2 * pad_x)
+    x0 = x - pad_x
+    y0 = text_bbox[1] - pad_y
+    x1 = x0 + rect_width
+    y1 = text_bbox[3] + pad_y
+    if bg is not None:
+        if radius > 0:
+            draw.rounded_rectangle((x0, y0, x1, y1), radius=radius, fill=bg)
+        else:
+            draw.rectangle((x0, y0, x1, y1), fill=bg)
+    draw.text((x, y), text, font=font, fill=fg)
+    return (x0, y0, x1, y1)
