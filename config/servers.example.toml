@@ -42,3 +42,6 @@ session_name = "vllm-planner-local"
 model_path = "/path/to/local/model"
 served_model_name = "Qwen/Qwen3.5-4B"
 conda_env_name = "vllm"
+max_model_len = 262144
+max_num_seqs = 512
+# gpu_memory_utilization = 0.95

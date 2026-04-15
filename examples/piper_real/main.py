@@ -3,9 +3,15 @@
 #!/usr/bin/python3
 """
 import dataclasses
+import json
 import logging
+import os
+from pathlib import Path
+import re
+import textwrap
 import time
 
+import cv2
 import numpy as np
 
 import tyro
@@ -89,6 +95,9 @@ class Args:
     )
     visualize_port: int = 7860  # Port for the visualization web server
     save_path: str = ""  # Optional MP4 output path synchronized with visualize updates
+    replay_debug_export_dir: str = (
+        ""  # Optional directory for hit-cap prompt/frame debug exports
+    )
     visualize_playback_rate: float = (
         1.0  # Relative replay visualization speed (1.0 = dataset FPS)
     )
@@ -219,6 +228,202 @@ def _build_replay_subtask_list(args: Args, prompt: str):
     return subtask_list
 
 
+def _resolve_replay_debug_export_dir(args: Args) -> str:
+    explicit_dir = args.replay_debug_export_dir.strip()
+    if explicit_dir:
+        return explicit_dir
+
+    if args.save_path.strip():
+        save_path = Path(args.save_path)
+        stem_path = save_path.with_suffix("")
+        return str(stem_path.parent / f"{stem_path.name}_debug")
+
+    return os.path.join("outputs", "replay_debug")
+
+
+def _sanitize_debug_path_component(raw_text: str, *, max_len: int = 48) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", raw_text.strip().lower()).strip("_")
+    if not slug:
+        return "subtask"
+    return slug[:max_len]
+
+
+def _compose_replay_debug_frame(
+    environment,
+    *,
+    frame_idx: int,
+    header_lines: list[str],
+) -> np.ndarray:
+    bgr_frames: list[np.ndarray] = []
+    for cam_name in environment.camera_names:
+        frame = environment.get_image(cam_name, frame_idx)
+        if frame.ndim == 3 and frame.shape[2] == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        canvas = frame.copy()
+        cv2.rectangle(canvas, (0, 0), (canvas.shape[1], 36), (0, 0, 0), -1)
+        cv2.putText(
+            canvas,
+            cam_name,
+            (12, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        bgr_frames.append(canvas)
+
+    if not bgr_frames:
+        return np.zeros((360, 640, 3), dtype=np.uint8)
+
+    tile_h = max(frame.shape[0] for frame in bgr_frames)
+    tile_w = max(frame.shape[1] for frame in bgr_frames)
+    normalized: list[np.ndarray] = []
+    for frame in bgr_frames:
+        if frame.shape[:2] != (tile_h, tile_w):
+            frame = cv2.resize(frame, (tile_w, tile_h), interpolation=cv2.INTER_AREA)
+        normalized.append(frame)
+
+    rows: list[np.ndarray] = []
+    cols = 2
+    for start in range(0, len(normalized), cols):
+        row_frames = normalized[start : start + cols]
+        if len(row_frames) < cols:
+            row_frames.append(np.zeros_like(normalized[0]))
+        rows.append(cv2.hconcat(row_frames))
+    sheet = cv2.vconcat(rows)
+
+    wrapped_lines: list[str] = []
+    wrap_width = max(32, sheet.shape[1] // 14)
+    for line in header_lines:
+        wrapped_lines.extend(textwrap.wrap(line, width=wrap_width) or [""])
+
+    line_height = 24
+    header_height = max(44, 12 + len(wrapped_lines) * line_height)
+    header = np.zeros((header_height, sheet.shape[1], 3), dtype=np.uint8)
+    header[:] = (22, 22, 22)
+    y = 26
+    for line in wrapped_lines:
+        cv2.putText(
+            header,
+            line,
+            (12, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (245, 245, 245),
+            1,
+            cv2.LINE_AA,
+        )
+        y += line_height
+    return cv2.vconcat([header, sheet])
+
+
+def _export_replay_manipulation_cap_debug(
+    environment,
+    *,
+    export_base_dir: str,
+    subtask_prompt: str,
+    current_policy_prompt: str,
+    prompt_history: list[dict[str, object]],
+    subtask_start_cursor: int,
+    executed_steps: int,
+    max_steps: int,
+    subtask_index: int | None,
+    total_subtasks: int | None,
+) -> Path:
+    export_root = Path(export_base_dir)
+    subtask_prefix = (
+        f"subtask_{subtask_index:02d}"
+        if subtask_index is not None
+        else "subtask_unknown"
+    )
+    export_dir = export_root / f"{subtask_prefix}_{_sanitize_debug_path_component(subtask_prompt)}"
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    history_items = prompt_history[-5:]
+    if not history_items:
+        history_items = [
+            {
+                "policy_steps": executed_steps,
+                "prompt": current_policy_prompt,
+                "reason": "no_prompt_history_available",
+            }
+        ]
+
+    exported_history: list[dict[str, object]] = []
+    for item_idx, item in enumerate(history_items, start=1):
+        policy_steps = int(item.get("policy_steps", 0))
+        if policy_steps <= 0:
+            frame_idx = subtask_start_cursor
+        else:
+            frame_idx = min(
+                subtask_start_cursor + policy_steps - 1,
+                max(environment.num_steps - 1, 0),
+            )
+        image_name = f"prompt_{item_idx:02d}_step_{policy_steps:03d}.png"
+        image_path = export_dir / image_name
+        prompt_text = str(item.get("prompt", ""))
+        reason_text = str(item.get("reason", ""))
+        debug_frame = _compose_replay_debug_frame(
+            environment,
+            frame_idx=frame_idx,
+            header_lines=[
+                f"Subtask {subtask_index}/{total_subtasks} hit cap at {max_steps} steps",
+                f"Representative frame: replay step {frame_idx}",
+                f"Policy steps at replan: {policy_steps}",
+                f"Prompt: {prompt_text}",
+                f"Reason: {reason_text}",
+            ],
+        )
+        cv2.imwrite(str(image_path), debug_frame)
+        exported_history.append(
+            {
+                "policy_steps": policy_steps,
+                "prompt": prompt_text,
+                "reason": reason_text,
+                "frame_idx": frame_idx,
+                "image_path": str(image_path),
+            }
+        )
+
+    final_frame_idx = min(
+        max(subtask_start_cursor, environment.get_cursor() - 1),
+        max(environment.num_steps - 1, 0),
+    )
+    final_frame_path = export_dir / "final_frame.png"
+    final_frame = _compose_replay_debug_frame(
+        environment,
+        frame_idx=final_frame_idx,
+        header_lines=[
+            f"Subtask {subtask_index}/{total_subtasks} final frame at cap",
+            f"Replay step {final_frame_idx} | executed_steps={executed_steps} | max_steps={max_steps}",
+            f"Current policy prompt: {current_policy_prompt}",
+        ],
+    )
+    cv2.imwrite(str(final_frame_path), final_frame)
+
+    manifest = {
+        "subtask_index": subtask_index,
+        "total_subtasks": total_subtasks,
+        "subtask_prompt": subtask_prompt,
+        "subtask_start_cursor": subtask_start_cursor,
+        "executed_steps": executed_steps,
+        "max_steps": max_steps,
+        "final_cursor": environment.get_cursor(),
+        "final_frame_idx": final_frame_idx,
+        "current_policy_prompt": current_policy_prompt,
+        "camera_names": list(environment.camera_names),
+        "history_window_size": len(exported_history),
+        "recent_prompt_history": exported_history,
+        "final_frame_path": str(final_frame_path),
+    }
+    (export_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return export_dir
+
+
 def _run_replay_manipulation_subtask(
     environment,
     agent: _policy_agent.PolicyAgent,
@@ -232,11 +437,15 @@ def _run_replay_manipulation_subtask(
     progress_stall_steps: int,
     progress_regression_threshold: float,
     progress_confirm_with_replanner: bool,
+    debug_export_dir: str = "",
+    subtask_index: int | None = None,
+    total_subtasks: int | None = None,
     visualizer=None,
 ) -> dict[str, object]:
     prompt_history: list[dict[str, object]] = []
     current_policy_prompt = subtask_prompt
     prompt_queries = 0
+    subtask_start_cursor = environment.get_cursor()
     has_progress_head = bool(getattr(agent, "policy_metadata", {}).get("has_progress_head", False))
     progress_tracker = ReplayTaskProgressTracker(
         complete_threshold=progress_complete_threshold,
@@ -406,6 +615,29 @@ def _run_replay_manipulation_subtask(
         logging.info(
             "Replay manipulate subtask hit fixed cap at %d policy steps.", max_steps
         )
+        if debug_export_dir:
+            try:
+                export_dir = _export_replay_manipulation_cap_debug(
+                    environment,
+                    export_base_dir=debug_export_dir,
+                    subtask_prompt=subtask_prompt,
+                    current_policy_prompt=current_policy_prompt,
+                    prompt_history=prompt_history,
+                    subtask_start_cursor=subtask_start_cursor,
+                    executed_steps=executed_steps,
+                    max_steps=max_steps,
+                    subtask_index=subtask_index,
+                    total_subtasks=total_subtasks,
+                )
+                logging.info(
+                    "Replay manipulate cap debug exported: %s",
+                    export_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logging.error(
+                    "Replay manipulate cap debug export failed: %s",
+                    exc,
+                )
     elif environment.is_episode_complete():
         logging.info(
             "Replay manipulate subtask stopped because the replay dataset is exhausted."
@@ -670,7 +902,7 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
     from examples.piper_real import (
         replay_manipulation_planner as _replay_manipulation_planner,
     )
-    from examples.piper_real import replay_planner as _replay_planner
+    from examples.piper_real import replay_navigation_executor as _replay_navigation_executor
     from examples.piper_real import replay_visualizer as _replay_visualizer
 
     if args.num_episodes != 1:
@@ -741,9 +973,8 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
         enabled=args.visualize,
     )
 
-    planner = _replay_planner.OfflineReplayNavigationPlanner(
+    navigation_executor = _replay_navigation_executor.ReplayNavigationExecutor(
         environment,
-        args.planner,
         on_step_callback=on_nav_step,
     )
     policy_agent = None if args.navigation_only else _create_policy_agent(args)
@@ -758,6 +989,7 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
     completed_manipulate = 0
     policy_steps = 0
     prompt_queries = 0
+    debug_export_dir = _resolve_replay_debug_export_dir(args)
 
     def _log_hybrid_early_exit(
         reason: str, *, subtask_index: int | None = None
@@ -805,22 +1037,25 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                         len(subtask_list),
                     )
                     return
-                if not planner.run(task_prompt=subtask.prompt):
+                result = navigation_executor.navigate(subtask.prompt)
+                if not result.ok:
                     _log_hybrid_early_exit(
-                        "navigation planner returned failure",
+                        result.error or "navigation tool returned failure",
                         subtask_index=idx,
                     )
                     logging.error(
-                        "Replay navigation failed at subtask %d/%d; aborting.",
+                        "Replay navigation failed at subtask %d/%d: %s",
                         idx + 1,
                         len(subtask_list),
+                        result.error or "unknown error",
                     )
                     return
                 completed_navigate += 1
                 logging.info(
-                    "Replay navigate subtask %d/%d succeeded at replay step %d/%d.",
+                    "Replay navigate subtask %d/%d succeeded via routine %s at replay step %d/%d.",
                     idx + 1,
                     len(subtask_list),
+                    result.routine_name,
                     environment.get_cursor(),
                     environment.num_steps,
                 )
@@ -848,6 +1083,9 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                 progress_stall_steps=args.planner.progress_stall_steps,
                 progress_regression_threshold=args.planner.progress_regression_threshold,
                 progress_confirm_with_replanner=args.planner.progress_confirm_with_replanner,
+                debug_export_dir=debug_export_dir,
+                subtask_index=idx + 1,
+                total_subtasks=len(subtask_list),
                 visualizer=visualizer,
             )
             executed_steps = int(manipulation_result["executed_steps"])

@@ -417,6 +417,90 @@ START_SERVERS=0 PYTHON_CMD=examples/piper_real/.venv/bin/python \
 START_TARGET=all bash scripts/run_piper_replay_mock.sh local
 ```
 
+### 8.1.1 Replay 后端：policy / planner / hybrid
+
+脚本支持三种 replay 后端，通过 `REPLAY_MODE` 环境变量或 wrapper flag 选择：
+
+| 后端 | Flag | 环境变量 | 说明 |
+|---|---|---|---|
+| `policy`（默认） | `--policy-replay` | `REPLAY_MODE=policy` | 仅 pi0 policy replay |
+| `planner` | `--planner-replay` | `REPLAY_MODE=planner` | 离线 VLM planner replay，不走 pi0 |
+| `hybrid` | `--hybrid-replay` | `REPLAY_MODE=hybrid` | VLM 拆任务/重规划 + 本地 navigation tool + pi0 操作的混合 replay |
+
+`hybrid` 模式需要 planner + pi0 两个服务，脚本会自动把 `START_TARGET=pi0` 提升为 `all`。其中 planner 仅负责 task decomposition 和 manipulate prompt replan；`navigate` 子任务复用共享 navigation tool，不再逐步请求 VLM 底盘动作。相关环境变量：
+
+- `PLANNER_HOST` / `PLANNER_PORT` / `PLANNER_MODEL`：planner 服务地址、端口、模型名；未设置时从 `config/servers.toml` 取。
+- `MANIPULATE_MAX_STEPS`（默认 64）：hybrid 模式下每个 manipulate subtask 的策略步数上限。
+- `MANIPULATE_REPLAN_INTERVAL_STEPS`（默认 16）：hybrid 模式下 VLM prompt 重规划的策略步间隔。
+- `WAIT_FOR_PLANNER_READY` / `PLANNER_READY_TIMEOUT_SEC` / `PLANNER_READY_RETRY_INTERVAL_SEC` / `PLANNER_READY_CHECK_TIMEOUT_SEC`：planner 预检开关与超时。
+
+```bash
+REPLAY_MODE=hybrid START_TARGET=all bash scripts/run_piper_replay_mock.sh local
+# 或：
+bash scripts/run_piper_replay_mock.sh --hybrid-replay local
+```
+
+`planner` 模式仅依赖 vLLM planner server，不启 pi0，并保留离线逐步 VLM 导航调试能力。专属环境变量 `NAVIGATION_ONLY`（默认 `1`）：为 `1` 时过滤掉 decomposition 日志里的 manipulate 子任务。`START_TARGET` 合法值在此模式下为 `planner`（默认）或 `all`。等价调用（替代旧的 `run_piper_replay_planner.sh`）：
+
+```bash
+# 本机模式：脚本启动 vLLM planner
+bash scripts/run_piper_replay_mock.sh --planner-replay local
+
+# 远端模式
+PLANNER_HOST=192.168.3.123 bash scripts/run_piper_replay_mock.sh --planner-replay remote
+
+# 跳过 server 启动，连接到已运行的 planner
+START_SERVERS=0 bash scripts/run_piper_replay_mock.sh --planner-replay none -- --skip-server-checks
+
+# 同时启动 planner + pi0（通常不需要，planner 模式不用 pi0）
+START_TARGET=all bash scripts/run_piper_replay_mock.sh --planner-replay local
+```
+
+### 8.1.2 `mock` 模式：无真实 pi0 时的一键 mock
+
+当真实 pi0 policy server 不可用时，用 `mock` 模式让脚本自动启动内建 mock server（`examples.piper_real.mock_policy_server`）：
+
+```bash
+bash scripts/run_piper_replay_mock.sh mock
+```
+
+效果：
+
+- 跳过 `start_pi0_server*.sh` / `start_servers.sh` 启动流程；
+- 在后台启动 mock policy server 并绑定到 `$PI0_HOST:$PI0_PORT`（默认 `127.0.0.1:$PI0_PORT`，可通过环境变量覆盖）；
+- 脚本退出时通过 EXIT trap 自动 kill mock 进程。
+
+与其它 MODE 的关系：`mock` 是"pi0 来源"维度下的第 4 个取值，与 `local/remote/none` 对齐。
+
+| MODE | pi0 server 由谁负责 |
+|---|---|
+| `local` | 脚本启动真实 pi0（本地） |
+| `remote` | 脚本启动真实 pi0（远端） |
+| `none` | 用户自己预先起好服务 |
+| `mock` | 脚本自动起内建 mock，并在退出时清理 |
+
+注意：
+
+- `REPLAY_MODE=planner` 不使用 pi0，`mock` 对它无效，脚本会直接报错退出。
+- `REPLAY_MODE=hybrid` + `mock`：只 mock pi0，planner 仍需用户自行准备。
+
+旧的 `--mock-pi0` flag 保留为兼容别名，触发时会打印 deprecation 警告并切换到 `MODE=mock`。
+
+### 8.1.3 可视化与 MP4 录制
+
+- `--visualize`：replay 过程中显示相机画面和 subtask overlay。
+- `--save-path PATH` 或 `SAVE_PATH=PATH`：把 replay 可视化保存为 MP4（转发到 `main.py --save-path`）。
+
+```bash
+bash scripts/run_piper_replay_mock.sh --visualize --save-path /tmp/replay.mp4 local
+```
+
+### 8.1.4 已存在 replay 进程的处理
+
+- `--kill-existing-replay`（默认启用）：启动前 SIGTERM 掉已有的 replay mock 进程。
+- `--no-kill-existing-replay`：保留已有进程不动。
+- `--replay-kill-grace-sec SECONDS`（默认 5）：SIGTERM 到 SIGKILL 的等待时间。
+
 ### 8.2 兼容方式：手动启动后执行 `main.py`
 
 下面示例假设你在本机启动两个服务。若使用 `remote` 模式，把 `PI0_HOST` 改成机器人工作站可达的实际地址即可。

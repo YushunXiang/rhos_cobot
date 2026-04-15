@@ -1,6 +1,9 @@
 # tests/test_replay_env.py
 """Tests for HDF5 replay environment."""
 
+import json
+from pathlib import Path
+
 import cv2
 import h5py
 import numpy as np
@@ -316,6 +319,72 @@ class TestOfflineReplayNavigationPlanner:
         assert env.get_cursor() == 3
 
 
+class TestReplayNavigationExecutor:
+    def test_navigate_advances_by_duration_times_fps(self, tmp_path, monkeypatch):
+        hdf5_path = str(tmp_path / "episode_0.hdf5")
+        _create_test_hdf5(hdf5_path, num_steps=10, fps=2.0)
+
+        from examples.piper_real import navigation_tool
+        from examples.piper_real.replay_env import ReplayEnvironment
+        from examples.piper_real.replay_navigation_executor import ReplayNavigationExecutor
+
+        env = ReplayEnvironment(dataset_path=hdf5_path, prompt="test task")
+        callback_steps: list[int] = []
+        executor = ReplayNavigationExecutor(
+            env,
+            on_step_callback=lambda step_idx: callback_steps.append(step_idx) or True,
+        )
+        monkeypatch.setattr(
+            navigation_tool,
+            "DEFAULT_DEMO_ROUTINE",
+            (
+                (0.2, 0.0, 1.0),
+                (0.0, 0.1, 0.5),
+            ),
+        )
+
+        result = executor.navigate("move to table")
+
+        assert result.ok is True
+        assert result.executed_steps == 2
+        assert env.get_cursor() == 3
+        assert callback_steps == [1, 2, 3]
+        assert executor.published_commands == [
+            [0.2, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.1],
+            [0.0, 0.0],
+            [0.0, 0.0],
+        ]
+
+    def test_navigate_fails_when_replay_exhausts_mid_routine(self, tmp_path, monkeypatch):
+        hdf5_path = str(tmp_path / "episode_0.hdf5")
+        _create_test_hdf5(hdf5_path, num_steps=2, fps=1.0)
+
+        from examples.piper_real import navigation_tool
+        from examples.piper_real.replay_env import ReplayEnvironment
+        from examples.piper_real.replay_navigation_executor import ReplayNavigationExecutor
+
+        env = ReplayEnvironment(dataset_path=hdf5_path, prompt="test task")
+        executor = ReplayNavigationExecutor(env)
+        monkeypatch.setattr(
+            navigation_tool,
+            "DEFAULT_DEMO_ROUTINE",
+            (
+                (0.2, 0.0, 1.0),
+                (0.1, 0.0, 1.0),
+            ),
+        )
+
+        result = executor.navigate("move until replay ends")
+
+        assert result.ok is False
+        assert result.executed_steps == 1
+        assert result.error == "replay dataset exhausted during navigation step"
+        assert env.get_cursor() == env.num_steps
+        assert executor.published_commands[-1] == [0.0, 0.0]
+
+
 class TestMainReplayIntegration:
     """Verify that main.py accepts --replay-dataset and constructs ReplayEnvironment."""
 
@@ -382,9 +451,10 @@ class TestMainReplayIntegration:
 
     def test_run_replay_hybrid_shares_cursor_between_subtasks(self, monkeypatch):
         from examples.piper_real import main as main_module
+        from examples.piper_real import navigation_tool as navigation_tool_mod
         from examples.piper_real import replay_env as replay_env_mod
         from examples.piper_real import replay_manipulation_planner as replay_manipulation_planner_mod
-        from examples.piper_real import replay_planner as replay_planner_mod
+        from examples.piper_real import replay_navigation_executor as replay_navigation_executor_mod
         from examples.piper_real import task_decomposer as task_decomposer_mod
         from examples.piper_real.planner_config import PlannerConfig
 
@@ -453,17 +523,24 @@ class TestMainReplayIntegration:
                     task_decomposer_mod.Subtask(type="navigate", prompt="nav to table"),
                 ]
 
-        class FakeOfflineReplayNavigationPlanner:
-            def __init__(self, environment, _config, on_step_callback=None) -> None:
+        class FakeReplayNavigationExecutor:
+            def __init__(self, environment, on_step_callback=None) -> None:
                 self.environment = environment
                 self.current_step = environment.get_cursor()
                 self.on_step_callback = on_step_callback
 
-            def run(self, task_prompt: str) -> bool:
-                recorded.setdefault("navigate_starts", []).append((task_prompt, self.environment.get_cursor()))
+            def navigate(self, prompt: str, *, dry_run: bool = False):
+                recorded.setdefault("navigate_starts", []).append(
+                    (prompt, self.environment.get_cursor(), dry_run)
+                )
                 self.environment.set_cursor(self.environment.get_cursor() + 2)
                 self.current_step = self.environment.get_cursor()
-                return True
+                return navigation_tool_mod.NavigationResult(
+                    ok=True,
+                    prompt=prompt,
+                    routine_name="default_demo",
+                    executed_steps=2,
+                )
 
         class FakePolicyAgent:
             def reset(self) -> None:
@@ -507,9 +584,9 @@ class TestMainReplayIntegration:
         monkeypatch.setattr(replay_env_mod, "ReplayEnvironment", FakeReplayEnvironment)
         monkeypatch.setattr(task_decomposer_mod, "TaskDecomposer", FakeTaskDecomposer)
         monkeypatch.setattr(
-            replay_planner_mod,
-            "OfflineReplayNavigationPlanner",
-            FakeOfflineReplayNavigationPlanner,
+            replay_navigation_executor_mod,
+            "ReplayNavigationExecutor",
+            FakeReplayNavigationExecutor,
         )
         monkeypatch.setattr(
             replay_manipulation_planner_mod,
@@ -531,10 +608,115 @@ class TestMainReplayIntegration:
         main_module._run_replay_hybrid(args, args.prompt)
 
         assert recorded["navigate_starts"] == [
-            ("nav to sink", 0),
-            ("nav to table", 4),
+            ("nav to sink", 0, False),
+            ("nav to table", 4, False),
         ]
         assert recorded["manipulate_prompts"] == ["grasp the plate rim"]
         assert recorded["policy_obs_steps"] == [2, 3]
         assert [call["executed_policy_steps"] for call in recorded["replan_calls"]] == [0, 2]
         assert recorded["closed"] is True
+
+    def test_run_replay_manipulation_subtask_exports_debug_on_cap(self, tmp_path):
+        from examples.piper_real import main as main_module
+        from examples.piper_real import replay_manipulation_planner as replay_manipulation_planner_mod
+
+        class FakeReplayEnvironment:
+            def __init__(self) -> None:
+                self._cursor = 0
+                self.num_steps = 8
+                self.camera_names = ("cam_high", "cam_left_wrist", "cam_right_wrist")
+
+            def get_cursor(self) -> int:
+                return self._cursor
+
+            def set_prompt(self, _prompt: str) -> None:
+                pass
+
+            def is_episode_complete(self) -> bool:
+                return self._cursor >= self.num_steps
+
+            def get_observation(self) -> dict:
+                idx = self._cursor
+                self._cursor += 1
+                return {
+                    "state": np.zeros(14, dtype=np.float32),
+                    "images": {},
+                    "prompt": "unused",
+                    "step": idx,
+                }
+
+            def apply_action(self, _action: dict) -> None:
+                pass
+
+            def get_image(self, cam_name: str, idx: int) -> np.ndarray:
+                color_seed = {
+                    "cam_high": (40, 80, 120),
+                    "cam_left_wrist": (80, 120, 160),
+                    "cam_right_wrist": (120, 160, 200),
+                }[cam_name]
+                frame = np.zeros((48, 64, 3), dtype=np.uint8)
+                frame[:] = tuple(min(channel + idx * 3, 255) for channel in color_seed)
+                return frame
+
+        class FakePolicyAgent:
+            policy_metadata: dict[str, object] = {}
+
+            def reset(self) -> None:
+                pass
+
+            def get_action(self, _observation: dict) -> dict:
+                return {"actions": np.zeros(14, dtype=np.float32)}
+
+        class FakeManipulationPromptPlanner:
+            def plan(
+                self,
+                *,
+                task_prompt: str,
+                current_policy_prompt: str,
+                executed_policy_steps: int,
+                prompt_history,
+            ):
+                if executed_policy_steps == 0:
+                    return replay_manipulation_planner_mod.ManipulationReplanDecision(
+                        action="continue",
+                        prompt=f"{task_prompt} / stage 0",
+                        reason="initial alignment",
+                    )
+                return replay_manipulation_planner_mod.ManipulationReplanDecision(
+                    action="continue",
+                    prompt=f"{current_policy_prompt} / step {executed_policy_steps}",
+                    reason=f"need more progress at {executed_policy_steps}",
+                )
+
+        env = FakeReplayEnvironment()
+        result = main_module._run_replay_manipulation_subtask(
+            env,
+            FakePolicyAgent(),
+            FakeManipulationPromptPlanner(),
+            subtask_prompt="Position the plate over the sink.",
+            max_steps=4,
+            replan_interval_steps=2,
+            progress_complete_threshold=0.95,
+            progress_stall_threshold=0.01,
+            progress_stall_steps=3,
+            progress_regression_threshold=0.05,
+            progress_confirm_with_replanner=True,
+            debug_export_dir=str(tmp_path),
+            subtask_index=2,
+            total_subtasks=9,
+            visualizer=None,
+        )
+
+        assert result["executed_steps"] == 4
+
+        export_dir = tmp_path / "subtask_02_position_the_plate_over_the_sink"
+        manifest_path = export_dir / "manifest.json"
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["subtask_index"] == 2
+        assert manifest["max_steps"] == 4
+        assert manifest["executed_steps"] == 4
+        assert manifest["history_window_size"] == 2
+        assert (export_dir / "final_frame.png").exists()
+        for entry in manifest["recent_prompt_history"]:
+            assert Path(entry["image_path"]).exists()
