@@ -45,3 +45,10 @@ conda_env_name = "vllm"
 max_model_len = 262144
 max_num_seqs = 512
 # gpu_memory_utilization = 0.95
+
+# ---------------------------------------------------------------------------
+# Planner client defaults
+# ---------------------------------------------------------------------------
+[planner]
+manipulation_replanner_enable_thinking = false
+manipulation_replanner_max_tokens = 256

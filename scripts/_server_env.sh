@@ -15,6 +15,10 @@ server_cfg() {
   python3 "$SERVER_HELPER_DIR/_read_toml.py" "$SERVER_CONFIG" "$1"
 }
 
+server_cfg_optional() {
+  python3 "$SERVER_HELPER_DIR/_read_toml.py" "$SERVER_CONFIG" "$1" 2>/dev/null || true
+}
+
 server_require_config() {
   if [[ -f "$SERVER_CONFIG" ]]; then
     return 0

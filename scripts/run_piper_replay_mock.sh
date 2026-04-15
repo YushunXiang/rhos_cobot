@@ -63,6 +63,10 @@ Environment overrides:
   MANIPULATE_REPLAN_INTERVAL_STEPS
                      Policy-step interval between VLM prompt replans in hybrid mode
                      default: 16
+  REPLAY_TASK_SPEC   Ordered task-spec JSON passed to hybrid ordered-task memory
+                     default: config/episode4_plate_wash_sandwich.task_spec.json
+                     when REPLAY_MODE=hybrid and DATASET basename is episode_4.hdf5
+                     set to 'none' to disable the default auto-spec
   PI0_HOST           pi0 policy server host (policy/hybrid modes)
                      default: 127.0.0.1 for local/none/mock; required for remote
   PI0_PORT           pi0 policy server port (policy/hybrid modes)
@@ -73,6 +77,13 @@ Environment overrides:
                      default: value from config/servers.toml
   PLANNER_MODEL      Planner model name (planner/hybrid modes)
                      default: value from config/servers.toml for the selected mode
+  PLANNER_REPLANNER_ENABLE_THINKING
+                     Enable Qwen thinking for manipulation replanner requests
+                     values: 0, 1, true, false
+                     default: config/servers.toml -> planner.manipulation_replanner_enable_thinking
+  PLANNER_REPLANNER_MAX_TOKENS
+                     Max completion tokens for manipulation replanner requests
+                     default: config/servers.toml -> planner.manipulation_replanner_max_tokens
   NAVIGATION_ONLY    Filter out manipulate subtasks from the decomposition log
                      (planner mode only). values: 0, 1; default: 1
   OPENPI_ROOT        Local OpenPI repo root used to resolve openpi_client
@@ -388,6 +399,18 @@ wait_for_planner_ready() {
 
 DATASET="${DATASET:-/inspire/qb-ilm/project/robot-reasoning/xiangyushun-p-xiangyushun/yushun/aloha-data/long-horizon-demo/episode_4.hdf5}"
 TASK_NAME="${TASK_NAME:-}"
+DEFAULT_REPLAY_TASK_SPEC="$SERVER_REPO_ROOT/config/episode4_plate_wash_sandwich.task_spec.json"
+REPLAY_TASK_SPEC="${REPLAY_TASK_SPEC:-}"
+REPLAY_TASK_SPEC_AUTO_ENABLE=1
+if [[ "${REPLAY_TASK_SPEC,,}" == "none" ]]; then
+  REPLAY_TASK_SPEC=""
+  REPLAY_TASK_SPEC_AUTO_ENABLE=0
+fi
+if [[ -z "$REPLAY_TASK_SPEC" && "$REPLAY_MODE" == "hybrid" && "$REPLAY_TASK_SPEC_AUTO_ENABLE" == "1" ]]; then
+  if [[ "$(basename "$DATASET")" == "episode_4.hdf5" && -f "$DEFAULT_REPLAY_TASK_SPEC" ]]; then
+    REPLAY_TASK_SPEC="$DEFAULT_REPLAY_TASK_SPEC"
+  fi
+fi
 PROMPT_SOURCE="default"
 if [[ -n "${PROMPT:-}" ]]; then
   PROMPT="$PROMPT"
@@ -398,7 +421,7 @@ elif [[ -n "$TASK_NAME" ]]; then
 elif [[ "$REPLAY_MODE" == "planner" ]]; then
   PROMPT="long-horizon replay planner validation"
 else
-  PROMPT="Analyze the video of a robotic arm performing sequential kitchen tasks and break down its actions into discrete subtasks. In the first phase, the robot grasps a white empty plate, positions it over a stainless steel sink, and rinses it under running water from the faucet. In the second phase, the scene shifts to a countertop setup with three plates: one with lettuce on the left, an empty plate in the middle, and one with two slices of bread on the right. Document the sandwich assembly process where the robot sequentially picks up one slice of bread from the right plate and places it onto the middle plate, transfers a piece of lettuce from the left plate onto the bread, and finally grasps the second slice of bread from the right plate, moving it to cover the lettuce."
+  PROMPT="Complete this long-horizon task in the exact order below. Phase 1, dish washing: pick up the center plate, turn on the faucet, wash the plate, turn off the faucet, and return the plate to its original position. Phase 2, transition: move from the sink area to the plate area. Phase 3, sandwich assembly: place the first bread slice on the center plate, place the lettuce on top of the bread on the center plate, and place the second bread slice on top of the lettuce. Do not skip, reorder, or revisit earlier subtasks unless the visual evidence clearly shows the current stage estimate is wrong."
 fi
 MAX_EPISODE_STEPS="${MAX_EPISODE_STEPS:-0}"
 MANIPULATE_MAX_STEPS="${MANIPULATE_MAX_STEPS:-64}"
@@ -462,6 +485,8 @@ if ! [[ "$MANIPULATE_REPLAN_INTERVAL_STEPS" =~ ^[0-9]+$ ]] || (( MANIPULATE_REPL
 fi
 
 PLANNER_BASE_URL=""
+PLANNER_REPLANNER_ENABLE_THINKING="${PLANNER_REPLANNER_ENABLE_THINKING:-$(server_cfg_optional planner.manipulation_replanner_enable_thinking)}"
+PLANNER_REPLANNER_MAX_TOKENS="${PLANNER_REPLANNER_MAX_TOKENS:-$(server_cfg_optional planner.manipulation_replanner_max_tokens)}"
 if [[ "$NEED_PLANNER" == "1" ]]; then
   PLANNER_PORT="${PLANNER_PORT:-$(server_cfg vllm.port)}"
 
@@ -485,6 +510,34 @@ if [[ "$NEED_PLANNER" == "1" ]]; then
   fi
 
   PLANNER_BASE_URL="http://$PLANNER_HOST:$PLANNER_PORT/v1"
+fi
+
+normalize_bool() {
+  local raw="$1"
+  case "${raw,,}" in
+    1|true|yes|on)
+      printf '%s\n' "1"
+      ;;
+    0|false|no|off)
+      printf '%s\n' "0"
+      ;;
+    "")
+      printf '%s\n' ""
+      ;;
+    *)
+      echo "Boolean value must be one of: 0, 1, true, false, yes, no, on, off" >&2
+      return 1
+      ;;
+  esac
+}
+
+PLANNER_REPLANNER_ENABLE_THINKING="$(normalize_bool "$PLANNER_REPLANNER_ENABLE_THINKING")"
+
+if [[ -n "$PLANNER_REPLANNER_MAX_TOKENS" ]]; then
+  if ! [[ "$PLANNER_REPLANNER_MAX_TOKENS" =~ ^[0-9]+$ ]] || (( PLANNER_REPLANNER_MAX_TOKENS <= 0 )); then
+    echo "PLANNER_REPLANNER_MAX_TOKENS must be a positive integer." >&2
+    exit 2
+  fi
 fi
 
 if [[ ! -f "$DATASET" ]]; then
@@ -600,6 +653,19 @@ if [[ "$REPLAY_MODE" == "hybrid" ]]; then
     --replay-manipulate-max-steps "$MANIPULATE_MAX_STEPS"
     --replay-manipulate-replan-interval-steps "$MANIPULATE_REPLAN_INTERVAL_STEPS"
   )
+  if [[ -n "$PLANNER_REPLANNER_ENABLE_THINKING" ]]; then
+    if [[ "$PLANNER_REPLANNER_ENABLE_THINKING" == "1" ]]; then
+      cmd+=(--planner.manipulation-replanner-enable-thinking)
+    else
+      cmd+=(--planner.no-manipulation-replanner-enable-thinking)
+    fi
+  fi
+  if [[ -n "$PLANNER_REPLANNER_MAX_TOKENS" ]]; then
+    cmd+=(--planner.manipulation-replanner-max-tokens "$PLANNER_REPLANNER_MAX_TOKENS")
+  fi
+  if [[ -n "$REPLAY_TASK_SPEC" ]]; then
+    cmd+=(--planner.task-spec-path "$REPLAY_TASK_SPEC")
+  fi
 fi
 
 if [[ "$VISUALIZE" == "1" ]]; then
@@ -635,6 +701,9 @@ fi
 if [[ "$REPLAY_MODE" == "hybrid" ]]; then
   echo "Manipulate max steps: $MANIPULATE_MAX_STEPS"
   echo "Manipulate replan interval steps: $MANIPULATE_REPLAN_INTERVAL_STEPS"
+  echo "Manipulation replanner enable thinking: ${PLANNER_REPLANNER_ENABLE_THINKING:-<default>}"
+  echo "Manipulation replanner max tokens: ${PLANNER_REPLANNER_MAX_TOKENS:-<default>}"
+  echo "Replay task spec: ${REPLAY_TASK_SPEC:-<unset>}"
 fi
 echo "Visualize: $VISUALIZE"
 echo "Save path: ${SAVE_PATH:-<unset>}"

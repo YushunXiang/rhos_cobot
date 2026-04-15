@@ -172,6 +172,16 @@ class ReplayEnvironment(_environment.Environment):
             raise IndexError(f"Replay step {idx} is out of range for {self._num_steps} steps")
         return self._load_image(cam_name, idx).copy()
 
+    def get_state(self, idx: int) -> np.ndarray:
+        if idx < 0 or idx >= self._num_steps:
+            raise IndexError(f"Replay step {idx} is out of range for state")
+        return self._qpos[idx].copy()
+
+    def get_ground_truth_action(self, idx: int) -> np.ndarray:
+        if idx < 0 or idx >= len(self.ground_truth_actions):
+            raise IndexError(f"Replay step {idx} is out of range for actions")
+        return np.asarray(self.ground_truth_actions[idx]).copy()
+
     def get_front_image(self, idx: int) -> np.ndarray:
         return self.get_image(self._front_camera_name, idx)
 

@@ -172,5 +172,60 @@ def test_replay_manipulation_subtask_falls_back_to_replanner_without_progress_he
 
     assert result["completed_by_progress"] is False
     assert result["completed_by_replan"] is True
+    assert result["completed"] is True
     assert [call["executed_policy_steps"] for call in planner.calls] == [0, 2]
     assert env.prompts == ["grasp handle"]
+
+
+def test_replay_manipulation_subtask_reports_step_cap_when_incomplete():
+    from examples.piper_real import main as main_module
+
+    class FakeEnvironment:
+        def __init__(self) -> None:
+            self._cursor = 0
+
+        def is_episode_complete(self) -> bool:
+            return False
+
+        def get_observation(self) -> dict:
+            self._cursor += 1
+            return {"step": self._cursor}
+
+        def apply_action(self, _action: dict) -> None:
+            pass
+
+        def set_prompt(self, _prompt: str) -> None:
+            pass
+
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.policy_metadata = {"has_progress_head": False}
+
+        def reset(self) -> None:
+            pass
+
+        def get_action(self, _observation: dict) -> dict:
+            return {"actions": np.zeros(14, dtype=np.float32)}
+
+    class FakePlanner:
+        def plan(self, **kwargs):
+            return SimpleNamespace(action="continue", prompt="keep trying", reason="not done")
+
+    result = main_module._run_replay_manipulation_subtask(
+        FakeEnvironment(),
+        FakeAgent(),
+        FakePlanner(),
+        subtask_prompt="turn tap",
+        max_steps=4,
+        replan_interval_steps=2,
+        progress_complete_threshold=0.85,
+        progress_stall_threshold=0.02,
+        progress_stall_steps=3,
+        progress_regression_threshold=0.1,
+        progress_confirm_with_replanner=False,
+    )
+
+    assert result["completed"] is False
+    assert result["completed_by_progress"] is False
+    assert result["completed_by_replan"] is False
+    assert result["stop_reason"] == "step_cap"

@@ -9,6 +9,12 @@ class PlannerConfig:
     base_url: str = "http://192.168.3.123:8000/v1"
     model: str = "Qwen/Qwen3.5-4B"
     api_key: str = "EMPTY"
+    task_spec_path: str = ""
+    task_memory_max_entries: int = 12
+    task_memory_enable_thinking: bool = False
+    task_memory_max_tokens: int = 256
+    task_decomposer_enable_thinking: bool = False
+    task_decomposer_max_tokens: int = 256
     max_nav_steps: int = 20
     max_linear_vel: float = 0.3
     max_angular_vel: float = 0.5
@@ -18,8 +24,16 @@ class PlannerConfig:
     progress_stall_steps: int = 3
     progress_regression_threshold: float = 0.1
     progress_confirm_with_replanner: bool = False
+    manipulation_replanner_enable_thinking: bool = False
+    manipulation_replanner_max_tokens: int = 256
 
     def validate_motion_limits(self) -> None:
+        if self.task_memory_max_entries <= 0:
+            raise ValueError("planner.task_memory_max_entries must be positive")
+        if self.task_memory_max_tokens <= 0:
+            raise ValueError("planner.task_memory_max_tokens must be positive")
+        if self.task_decomposer_max_tokens <= 0:
+            raise ValueError("planner.task_decomposer_max_tokens must be positive")
         if self.max_nav_steps <= 0:
             raise ValueError("planner.max_nav_steps must be positive")
         if self.max_linear_vel <= 0:
@@ -46,6 +60,8 @@ class PlannerConfig:
             raise ValueError("planner.progress_stall_steps must be positive")
         if self.progress_regression_threshold < 0:
             raise ValueError("planner.progress_regression_threshold must be non-negative")
+        if self.manipulation_replanner_max_tokens <= 0:
+            raise ValueError("planner.manipulation_replanner_max_tokens must be positive")
 
     def validate_service_config(self) -> None:
         if not self.base_url.strip():

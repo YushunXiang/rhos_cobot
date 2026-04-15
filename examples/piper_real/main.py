@@ -199,12 +199,50 @@ def _resolve_replay_mode(args: Args) -> str:
     return replay_mode
 
 
-def _build_replay_subtask_list(args: Args, prompt: str):
+def _build_replay_ordered_task_memory_runtime(args: Args, environment):
+    task_spec_path = args.planner.task_spec_path.strip()
+    if not task_spec_path:
+        return None
+
+    from examples.piper_real import replay_task_memory as _replay_task_memory
+
+    try:
+        runtime = _replay_task_memory.ReplayOrderedTaskMemoryRuntime(
+            environment,
+            args.planner,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logging.error(
+            "Replay hybrid could not initialize ordered task memory from %s: %s",
+            task_spec_path,
+            exc,
+        )
+        return None
+
+    logging.info("Replay hybrid ordered task memory enabled: %s", task_spec_path)
+    return runtime
+
+
+def _build_replay_subtask_list(args: Args, prompt: str, ordered_task_memory_runtime=None):
     from examples.piper_real import task_decomposer as _task_decomposer
 
     decomposer = _task_decomposer.TaskDecomposer(args.planner)
+    decompose_kwargs: dict[str, str] = {}
+    if ordered_task_memory_runtime is not None:
+        try:
+            decompose_kwargs = ordered_task_memory_runtime.build_context()
+        except Exception as exc:  # noqa: BLE001
+            logging.warning(
+                "Replay decomposition is proceeding without ordered task memory context: %s",
+                exc,
+            )
+            decompose_kwargs = {}
+
     try:
-        subtask_list = decomposer.decompose(prompt)
+        if decompose_kwargs:
+            subtask_list = decomposer.decompose(prompt, **decompose_kwargs)
+        else:
+            subtask_list = decomposer.decompose(prompt)
     except _task_decomposer.DecompositionError as exc:
         if args.navigation_only:
             logging.warning(
@@ -445,7 +483,9 @@ def _run_replay_manipulation_subtask(
     prompt_history: list[dict[str, object]] = []
     current_policy_prompt = subtask_prompt
     prompt_queries = 0
-    subtask_start_cursor = environment.get_cursor()
+    subtask_start_cursor = (
+        environment.get_cursor() if hasattr(environment, "get_cursor") else 0
+    )
     has_progress_head = bool(getattr(agent, "policy_metadata", {}).get("has_progress_head", False))
     progress_tracker = ReplayTaskProgressTracker(
         complete_threshold=progress_complete_threshold,
@@ -512,14 +552,17 @@ def _run_replay_manipulation_subtask(
             return {
                 "executed_steps": 0,
                 "prompt_queries": prompt_queries,
+                "completed": True,
                 "completed_by_replan": True,
                 "completed_by_progress": False,
                 "last_policy_prompt": current_policy_prompt,
+                "stop_reason": "replanner_complete",
             }
     else:
         logging.info("Replay manipulate subtask is using progress-first mode with replanner fallback.")
 
     executed_steps = 0
+    aborted_by_user = False
     while executed_steps < max_steps and not environment.is_episode_complete():
         observation = environment.get_observation()
         action = agent.get_action(observation)
@@ -536,6 +579,7 @@ def _run_replay_manipulation_subtask(
                     "Replay manipulate aborted by user at policy step %d.",
                     executed_steps,
                 )
+                aborted_by_user = True
                 break
 
         if has_progress_head and progress_value is not None:
@@ -551,17 +595,21 @@ def _run_replay_manipulation_subtask(
                     return {
                         "executed_steps": executed_steps,
                         "prompt_queries": prompt_queries,
+                        "completed": True,
                         "completed_by_replan": False,
                         "completed_by_progress": True,
                         "last_policy_prompt": current_policy_prompt,
+                        "stop_reason": "progress_complete",
                     }
                 if not _replan(executed_steps):
                     return {
                         "executed_steps": executed_steps,
                         "prompt_queries": prompt_queries,
+                        "completed": True,
                         "completed_by_replan": True,
                         "completed_by_progress": False,
                         "last_policy_prompt": current_policy_prompt,
+                        "stop_reason": "replanner_complete",
                     }
             elif decision.event in {"stall", "regression"}:
                 logging.warning(
@@ -574,9 +622,11 @@ def _run_replay_manipulation_subtask(
                     return {
                         "executed_steps": executed_steps,
                         "prompt_queries": prompt_queries,
+                        "completed": True,
                         "completed_by_replan": True,
                         "completed_by_progress": False,
                         "last_policy_prompt": current_policy_prompt,
+                        "stop_reason": "replanner_complete",
                     }
                 continue
 
@@ -590,9 +640,11 @@ def _run_replay_manipulation_subtask(
             return {
                 "executed_steps": executed_steps,
                 "prompt_queries": prompt_queries,
+                "completed": True,
                 "completed_by_replan": True,
                 "completed_by_progress": False,
                 "last_policy_prompt": current_policy_prompt,
+                "stop_reason": "replanner_complete",
             }
 
         if (
@@ -606,9 +658,11 @@ def _run_replay_manipulation_subtask(
             return {
                 "executed_steps": executed_steps,
                 "prompt_queries": prompt_queries,
+                "completed": True,
                 "completed_by_replan": True,
                 "completed_by_progress": False,
                 "last_policy_prompt": current_policy_prompt,
+                "stop_reason": "replanner_complete",
             }
 
     if executed_steps >= max_steps and not environment.is_episode_complete():
@@ -643,12 +697,23 @@ def _run_replay_manipulation_subtask(
             "Replay manipulate subtask stopped because the replay dataset is exhausted."
         )
 
+    if aborted_by_user:
+        stop_reason = "user_abort"
+    elif executed_steps >= max_steps and not environment.is_episode_complete():
+        stop_reason = "step_cap"
+    elif environment.is_episode_complete():
+        stop_reason = "replay_exhausted"
+    else:
+        stop_reason = "incomplete"
+
     return {
         "executed_steps": executed_steps,
         "prompt_queries": prompt_queries,
+        "completed": False,
         "completed_by_replan": False,
         "completed_by_progress": False,
         "last_policy_prompt": current_policy_prompt,
+        "stop_reason": stop_reason,
     }
 
 
@@ -950,7 +1015,15 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
         max_steps=args.max_episode_steps if args.max_episode_steps > 0 else None,
     )
 
-    subtask_list = _build_replay_subtask_list(args, prompt)
+    ordered_task_memory_runtime = _build_replay_ordered_task_memory_runtime(
+        args,
+        environment,
+    )
+    subtask_list = _build_replay_subtask_list(
+        args,
+        prompt,
+        ordered_task_memory_runtime=ordered_task_memory_runtime,
+    )
     if subtask_list is None:
         logging.error(
             "Replay hybrid exiting before execution at replay step %d/%d: subtask decomposition failed.",
@@ -981,8 +1054,17 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
     manipulation_planner = (
         None
         if args.navigation_only
-        else _replay_manipulation_planner.ReplayManipulationPromptPlanner(
-            environment, args.planner
+        else (
+            _replay_manipulation_planner.ReplayManipulationPromptPlanner(
+                environment,
+                args.planner,
+                task_memory_runtime=ordered_task_memory_runtime,
+            )
+            if ordered_task_memory_runtime is not None
+            else _replay_manipulation_planner.ReplayManipulationPromptPlanner(
+                environment,
+                args.planner,
+            )
         )
     )
     completed_navigate = 0
@@ -1089,19 +1171,47 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                 visualizer=visualizer,
             )
             executed_steps = int(manipulation_result["executed_steps"])
-            completed_manipulate += 1
             policy_steps += executed_steps
             prompt_queries += int(manipulation_result["prompt_queries"])
-            logging.info(
-                "Replay manipulate subtask %d/%d completed after %d policy steps, "
-                "%d prompt queries, at replay cursor %d/%d.",
-                idx + 1,
-                len(subtask_list),
-                executed_steps,
-                int(manipulation_result["prompt_queries"]),
-                environment.get_cursor(),
-                environment.num_steps,
-            )
+            if bool(manipulation_result.get("completed", False)):
+                completed_manipulate += 1
+                logging.info(
+                    "Replay manipulate subtask %d/%d completed after %d policy steps, "
+                    "%d prompt queries, at replay cursor %d/%d.",
+                    idx + 1,
+                    len(subtask_list),
+                    executed_steps,
+                    int(manipulation_result["prompt_queries"]),
+                    environment.get_cursor(),
+                    environment.num_steps,
+                )
+            else:
+                stop_reason = str(manipulation_result.get("stop_reason", "incomplete"))
+                if stop_reason == "replay_exhausted" and idx + 1 == len(subtask_list):
+                    logging.warning(
+                        "Replay dataset exhausted during final manipulate subtask %d/%d "
+                        "after %d policy steps with no explicit completion signal.",
+                        idx + 1,
+                        len(subtask_list),
+                        executed_steps,
+                    )
+                    break
+                _log_hybrid_early_exit(
+                    f"manipulate subtask did not complete ({stop_reason})",
+                    subtask_index=idx,
+                )
+                logging.error(
+                    "Replay manipulate subtask %d/%d did not complete after %d policy steps, "
+                    "%d prompt queries, at replay cursor %d/%d; stop_reason=%s",
+                    idx + 1,
+                    len(subtask_list),
+                    executed_steps,
+                    int(manipulation_result["prompt_queries"]),
+                    environment.get_cursor(),
+                    environment.num_steps,
+                    stop_reason,
+                )
+                return
             if environment.is_episode_complete() and idx + 1 < len(subtask_list):
                 _log_hybrid_early_exit(
                     "replay dataset exhausted with remaining subtasks",
