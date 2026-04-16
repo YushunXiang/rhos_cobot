@@ -62,8 +62,11 @@ This connects to `web@192.168.3.123`, starts `vllm serve` inside a remote `tmux`
 Minimum requirements:
 
 - Accepts text chat-completions requests for task decomposition.
+- Accepts replay manipulation replanning requests when `REPLAY_MODE=hybrid`.
 - Returns JSON-only planner responses.
 - Is reachable from the robot workstation at the configured `--planner.base-url`.
+
+In live deploy and `REPLAY_MODE=hybrid`, the planner does not execute navigation motions. It only returns ordered `navigate` / `manipulate` subtasks; each `navigate` subtask is then executed by the shared local navigation tool.
 
 The planner must return this shape:
 

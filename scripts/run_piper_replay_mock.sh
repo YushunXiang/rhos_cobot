@@ -15,20 +15,26 @@ source "$SCRIPT_DIR/_server_env.sh"
 print_usage() {
   cat <<EOF
 Usage:
-  bash scripts/run_piper_replay_mock.sh [wrapper options] [local|remote|none] [--] [extra main.py args...]
+  bash scripts/run_piper_replay_mock.sh [wrapper options] [local|remote|none|mock] [--] [extra main.py args...]
 
 Modes:
   local   Start the Pi0 policy server locally (default)
   remote  Start the Pi0 policy server remotely
   none    Do not start servers; connect to an already running pi0 policy server
+  mock    Start the built-in mock policy server (examples.piper_real.mock_policy_server)
+          in the background, bound to PI0_HOST:PI0_PORT; kill it on exit.
+          Useful when the real pi0 server is unavailable.
 
 Wrapper options:
   --planner-replay    Delegate to offline VLM planner replay instead of pi0 policy replay
   --hybrid-replay     Run offline replay with VLM navigation + pi0 manipulation
   --policy-replay     Force pi0 policy replay
+  --mock-pi0          Deprecated alias for MODE=mock.
   --kill-existing-replay
                      Stop any existing replay mock process before starting
                      default: enabled
+  --visualize         Show camera views and subtask overlay during replay
+  --save-path PATH    Save replay visualization to MP4 at PATH
   --no-kill-existing-replay
                      Keep any existing replay mock process alive
   --replay-kill-grace-sec SECONDS
@@ -57,16 +63,29 @@ Environment overrides:
   MANIPULATE_REPLAN_INTERVAL_STEPS
                      Policy-step interval between VLM prompt replans in hybrid mode
                      default: 16
-  PI0_HOST           pi0 policy server host
-                     default: 127.0.0.1 for local/none; required for remote
-  PI0_PORT           pi0 policy server port
+  REPLAY_TASK_SPEC   Ordered task-spec JSON passed to hybrid ordered-task memory
+                     default: config/episode4_plate_wash_sandwich.task_spec.json
+                     when REPLAY_MODE=hybrid and DATASET basename is episode_4.hdf5
+                     set to 'none' to disable the default auto-spec
+  PI0_HOST           pi0 policy server host (policy/hybrid modes)
+                     default: 127.0.0.1 for local/none/mock; required for remote
+  PI0_PORT           pi0 policy server port (policy/hybrid modes)
                      default: value from config/servers.toml
-  PLANNER_HOST       Planner server host for hybrid mode
+  PLANNER_HOST       Planner server host (planner/hybrid modes)
                      default: PI0_HOST when set; else 127.0.0.1 for local/none
-  PLANNER_PORT       Planner server port for hybrid mode
+  PLANNER_PORT       Planner server port (planner/hybrid modes)
                      default: value from config/servers.toml
-  PLANNER_MODEL      Planner model name for hybrid mode
+  PLANNER_MODEL      Planner model name (planner/hybrid modes)
                      default: value from config/servers.toml for the selected mode
+  PLANNER_REPLANNER_ENABLE_THINKING
+                     Enable Qwen thinking for manipulation replanner requests
+                     values: 0, 1, true, false
+                     default: config/servers.toml -> planner.manipulation_replanner_enable_thinking
+  PLANNER_REPLANNER_MAX_TOKENS
+                     Max completion tokens for manipulation replanner requests
+                     default: config/servers.toml -> planner.manipulation_replanner_max_tokens
+  NAVIGATION_ONLY    Filter out manipulate subtasks from the decomposition log
+                     (planner mode only). values: 0, 1; default: 1
   OPENPI_ROOT        Local OpenPI repo root used to resolve openpi_client
                      default: value from config/servers.toml -> pi0.local.openpi_root
   PYTHON_CMD         Python interpreter used to run main.py
@@ -74,8 +93,10 @@ Environment overrides:
   START_SERVERS      Set to 0 to skip server startup even in local/remote mode
                      default: 1
   START_TARGET       Which startup helper to use in local/remote mode
-                     values: pi0, all
-                     default: pi0
+                     values: pi0, planner, all
+                     default: pi0 (policy/hybrid), planner (planner)
+  SAVE_PATH          Forwarded to main.py --save-path for MP4 output
+                     default: empty (disabled)
   WAIT_FOR_PI0_READY Set to 0 to skip the preflight wait loop
                      default: 1
   PI0_READY_TIMEOUT_SEC
@@ -102,6 +123,7 @@ Environment overrides:
 
 Examples:
   bash scripts/run_piper_replay_mock.sh
+  bash scripts/run_piper_replay_mock.sh mock
   bash scripts/run_piper_replay_mock.sh --replay-kill-grace-sec 10
   bash scripts/run_piper_replay_mock.sh --no-kill-existing-replay none
   REPLAY_MODE=planner START_TARGET=all bash scripts/run_piper_replay_mock.sh
@@ -118,16 +140,28 @@ MODE_SET=0
 KILL_EXISTING_REPLAY="${KILL_EXISTING_REPLAY:-1}"
 REPLAY_KILL_GRACE_SEC="${REPLAY_KILL_GRACE_SEC:-5}"
 REPLAY_MODE="${REPLAY_MODE:-policy}"
+VISUALIZE=0
+SAVE_PATH="${SAVE_PATH:-}"
 MAIN_ARGS=()
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
-    local|remote|none)
+    local|remote|none|mock)
       if [[ "$MODE_SET" == "1" ]]; then
         echo "Mode was specified more than once." >&2
         exit 2
       fi
       MODE="$1"
+      MODE_SET=1
+      shift
+      ;;
+    --mock-pi0)
+      echo "Warning: --mock-pi0 is deprecated; use MODE=mock instead (e.g. 'bash $0 mock')." >&2
+      if [[ "$MODE_SET" == "1" && "$MODE" != "mock" ]]; then
+        echo "--mock-pi0 conflicts with MODE=$MODE." >&2
+        exit 2
+      fi
+      MODE="mock"
       MODE_SET=1
       shift
       ;;
@@ -145,6 +179,22 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --policy-replay)
       REPLAY_MODE="policy"
+      shift
+      ;;
+    --visualize)
+      VISUALIZE=1
+      shift
+      ;;
+    --save-path)
+      if [[ "$#" -lt 2 ]]; then
+        echo "--save-path requires a value." >&2
+        exit 2
+      fi
+      SAVE_PATH="$2"
+      shift 2
+      ;;
+    --save-path=*)
+      SAVE_PATH="${1#*=}"
       shift
       ;;
     --no-kill-existing-replay)
@@ -211,6 +261,10 @@ stop_existing_replay_processes() {
   local -a replay_pids=()
   local -a remaining_pids=()
   local line pid proc_name
+  local pgrep_pattern='\-m examples\.piper_real\.main .*--replay-dataset'
+  if [[ "$REPLAY_MODE" == "planner" ]]; then
+    pgrep_pattern='\-m examples\.piper_real\.main .*--replay-dataset .*--use-llm-planner'
+  fi
 
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
@@ -220,7 +274,7 @@ stop_existing_replay_processes() {
     [[ "$proc_name" == python* ]] || continue
     replay_pids+=("$pid")
     echo "Found existing replay mock process: $line"
-  done < <(pgrep -af '\-m examples\.piper_real\.main .*--replay-dataset' || true)
+  done < <(pgrep -af "$pgrep_pattern" || true)
 
   if [[ "${#replay_pids[@]}" -eq 0 ]]; then
     return 0
@@ -343,56 +397,20 @@ wait_for_planner_ready() {
   done
 }
 
-delegate_to_planner_replay() {
-  local planner_start_target="$START_TARGET"
-  case "$planner_start_target" in
-    pi0)
-      planner_start_target="planner"
-      ;;
-    all|planner)
-      ;;
-    *)
-      echo "Unsupported START_TARGET='$START_TARGET' for planner replay. Expected 'pi0', 'planner', or 'all'." >&2
-      exit 1
-      ;;
-  esac
-
-  if [[ -n "${PI0_HOST:-}" && -z "${PLANNER_HOST:-}" ]]; then
-    export PLANNER_HOST="$PI0_HOST"
-  fi
-  if [[ -n "${PI0_PORT:-}" && -z "${PLANNER_PORT:-}" ]]; then
-    export PLANNER_PORT="$PI0_PORT"
-  fi
-  if [[ -n "${WAIT_FOR_PI0_READY:-}" && -z "${WAIT_FOR_PLANNER_READY:-}" ]]; then
-    export WAIT_FOR_PLANNER_READY="$WAIT_FOR_PI0_READY"
-  fi
-  if [[ -n "${PI0_READY_TIMEOUT_SEC:-}" && -z "${PLANNER_READY_TIMEOUT_SEC:-}" ]]; then
-    export PLANNER_READY_TIMEOUT_SEC="$PI0_READY_TIMEOUT_SEC"
-  fi
-  if [[ -n "${PI0_READY_RETRY_INTERVAL_SEC:-}" && -z "${PLANNER_READY_RETRY_INTERVAL_SEC:-}" ]]; then
-    export PLANNER_READY_RETRY_INTERVAL_SEC="$PI0_READY_RETRY_INTERVAL_SEC"
-  fi
-  if [[ -n "${PI0_READY_CHECK_TIMEOUT_SEC:-}" && -z "${PLANNER_READY_CHECK_TIMEOUT_SEC:-}" ]]; then
-    export PLANNER_READY_CHECK_TIMEOUT_SEC="$PI0_READY_CHECK_TIMEOUT_SEC"
-  fi
-
-  export DATASET PROMPT MAX_EPISODE_STEPS PYTHON_CMD START_SERVERS OPENPI_ROOT OPENPI_CLIENT_SRC
-  export TASK_NAME PROMPT_SOURCE
-  export KILL_EXISTING_REPLAY REPLAY_KILL_GRACE_SEC
-  export START_TARGET="$planner_start_target"
-
-  echo "REPLAY_MODE=planner detected; delegating to scripts/run_piper_replay_planner.sh"
-  local -a delegate_cmd=(bash "$SCRIPT_DIR/run_piper_replay_planner.sh" "$MODE")
-  if [[ "${#MAIN_ARGS[@]}" -gt 0 ]]; then
-    delegate_cmd+=(-- "${MAIN_ARGS[@]}")
-  fi
-  printf '  %q' "${delegate_cmd[@]}"
-  printf '\n'
-  exec "${delegate_cmd[@]}"
-}
-
 DATASET="${DATASET:-/inspire/qb-ilm/project/robot-reasoning/xiangyushun-p-xiangyushun/yushun/aloha-data/long-horizon-demo/episode_4.hdf5}"
 TASK_NAME="${TASK_NAME:-}"
+DEFAULT_REPLAY_TASK_SPEC="$SERVER_REPO_ROOT/config/episode4_plate_wash_sandwich.task_spec.json"
+REPLAY_TASK_SPEC="${REPLAY_TASK_SPEC:-}"
+REPLAY_TASK_SPEC_AUTO_ENABLE=1
+if [[ "${REPLAY_TASK_SPEC,,}" == "none" ]]; then
+  REPLAY_TASK_SPEC=""
+  REPLAY_TASK_SPEC_AUTO_ENABLE=0
+fi
+if [[ -z "$REPLAY_TASK_SPEC" && "$REPLAY_MODE" == "hybrid" && "$REPLAY_TASK_SPEC_AUTO_ENABLE" == "1" ]]; then
+  if [[ "$(basename "$DATASET")" == "episode_4.hdf5" && -f "$DEFAULT_REPLAY_TASK_SPEC" ]]; then
+    REPLAY_TASK_SPEC="$DEFAULT_REPLAY_TASK_SPEC"
+  fi
+fi
 PROMPT_SOURCE="default"
 if [[ -n "${PROMPT:-}" ]]; then
   PROMPT="$PROMPT"
@@ -400,32 +418,60 @@ if [[ -n "${PROMPT:-}" ]]; then
 elif [[ -n "$TASK_NAME" ]]; then
   PROMPT="$(server_lookup_task_prompt "$TASK_NAME")"
   PROMPT_SOURCE="task_catalog:$TASK_NAME"
+elif [[ "$REPLAY_MODE" == "planner" ]]; then
+  PROMPT="long-horizon replay planner validation"
 else
-  PROMPT="Analyze the video of a robotic arm performing sequential kitchen tasks and break down its actions into discrete subtasks. In the first phase, the robot grasps a white empty plate, positions it over a stainless steel sink, and rinses it under running water from the faucet. In the second phase, the scene shifts to a countertop setup with three plates: one with lettuce on the left, an empty plate in the middle, and one with two slices of bread on the right. Document the sandwich assembly process where the robot sequentially picks up one slice of bread from the right plate and places it onto the middle plate, transfers a piece of lettuce from the left plate onto the bread, and finally grasps the second slice of bread from the right plate, moving it to cover the lettuce."
+  PROMPT="Complete this long-horizon task in the exact order below. Phase 1, dish washing: pick up the center plate, turn on the faucet, wash the plate, turn off the faucet, and return the plate to its original position. Phase 2, transition: move from the sink area to the plate area. Phase 3, sandwich assembly: place the first bread slice on the center plate, place the lettuce on top of the bread on the center plate, and place the second bread slice on top of the lettuce. Do not skip, reorder, or revisit earlier subtasks unless the visual evidence clearly shows the current stage estimate is wrong."
 fi
 MAX_EPISODE_STEPS="${MAX_EPISODE_STEPS:-0}"
 MANIPULATE_MAX_STEPS="${MANIPULATE_MAX_STEPS:-64}"
 MANIPULATE_REPLAN_INTERVAL_STEPS="${MANIPULATE_REPLAN_INTERVAL_STEPS:-16}"
+NAVIGATION_ONLY="${NAVIGATION_ONLY:-1}"
 PYTHON_CMD="${PYTHON_CMD:-$(server_default_python_cmd)}"
 START_SERVERS="${START_SERVERS:-1}"
-START_TARGET="${START_TARGET:-pi0}"
+
+if [[ "$REPLAY_MODE" == "planner" ]]; then
+  START_TARGET="${START_TARGET:-planner}"
+else
+  START_TARGET="${START_TARGET:-pi0}"
+fi
+
+NEED_PI0=1
+NEED_PLANNER=0
+case "$REPLAY_MODE" in
+  policy)
+    NEED_PI0=1
+    NEED_PLANNER=0
+    ;;
+  planner)
+    NEED_PI0=0
+    NEED_PLANNER=1
+    ;;
+  hybrid)
+    NEED_PI0=1
+    NEED_PLANNER=1
+    ;;
+esac
 
 server_require_config
 
-if [[ "$REPLAY_MODE" == "planner" ]]; then
-  delegate_to_planner_replay
+if [[ "$REPLAY_MODE" == "planner" && "$MODE" == "mock" ]]; then
+  echo "REPLAY_MODE=planner does not use pi0; MODE=mock has no effect. Use MODE=none/local/remote." >&2
+  exit 2
 fi
 
-PI0_PORT="${PI0_PORT:-$(server_cfg pi0.port)}"
 OPENPI_ROOT="${OPENPI_ROOT:-$(server_default_openpi_root)}"
 OPENPI_CLIENT_SRC="${OPENPI_CLIENT_SRC:-}"
 
-if [[ -z "${PI0_HOST:-}" ]]; then
-  if [[ "$MODE" == "remote" ]]; then
-    echo "PI0_HOST is required in remote mode. Use the robot workstation reachable address, not the SSH alias." >&2
-    exit 1
+if [[ "$NEED_PI0" == "1" ]]; then
+  PI0_PORT="${PI0_PORT:-$(server_cfg pi0.port)}"
+  if [[ -z "${PI0_HOST:-}" ]]; then
+    if [[ "$MODE" == "remote" ]]; then
+      echo "PI0_HOST is required in remote mode. Use the robot workstation reachable address, not the SSH alias." >&2
+      exit 1
+    fi
+    PI0_HOST="127.0.0.1"
   fi
-  PI0_HOST="127.0.0.1"
 fi
 
 if ! [[ "$MANIPULATE_MAX_STEPS" =~ ^[0-9]+$ ]] || (( MANIPULATE_MAX_STEPS <= 0 )); then
@@ -439,14 +485,16 @@ if ! [[ "$MANIPULATE_REPLAN_INTERVAL_STEPS" =~ ^[0-9]+$ ]] || (( MANIPULATE_REPL
 fi
 
 PLANNER_BASE_URL=""
-if [[ "$REPLAY_MODE" == "hybrid" ]]; then
+PLANNER_REPLANNER_ENABLE_THINKING="${PLANNER_REPLANNER_ENABLE_THINKING:-$(server_cfg_optional planner.manipulation_replanner_enable_thinking)}"
+PLANNER_REPLANNER_MAX_TOKENS="${PLANNER_REPLANNER_MAX_TOKENS:-$(server_cfg_optional planner.manipulation_replanner_max_tokens)}"
+if [[ "$NEED_PLANNER" == "1" ]]; then
   PLANNER_PORT="${PLANNER_PORT:-$(server_cfg vllm.port)}"
 
   if [[ -z "${PLANNER_HOST:-}" ]]; then
     if [[ -n "${PI0_HOST:-}" ]]; then
       PLANNER_HOST="$PI0_HOST"
     elif [[ "$MODE" == "remote" ]]; then
-      echo "PLANNER_HOST is required in remote mode for REPLAY_MODE=hybrid." >&2
+      echo "PLANNER_HOST is required in remote mode for REPLAY_MODE=$REPLAY_MODE." >&2
       exit 1
     else
       PLANNER_HOST="127.0.0.1"
@@ -462,6 +510,34 @@ if [[ "$REPLAY_MODE" == "hybrid" ]]; then
   fi
 
   PLANNER_BASE_URL="http://$PLANNER_HOST:$PLANNER_PORT/v1"
+fi
+
+normalize_bool() {
+  local raw="$1"
+  case "${raw,,}" in
+    1|true|yes|on)
+      printf '%s\n' "1"
+      ;;
+    0|false|no|off)
+      printf '%s\n' "0"
+      ;;
+    "")
+      printf '%s\n' ""
+      ;;
+    *)
+      echo "Boolean value must be one of: 0, 1, true, false, yes, no, on, off" >&2
+      return 1
+      ;;
+  esac
+}
+
+PLANNER_REPLANNER_ENABLE_THINKING="$(normalize_bool "$PLANNER_REPLANNER_ENABLE_THINKING")"
+
+if [[ -n "$PLANNER_REPLANNER_MAX_TOKENS" ]]; then
+  if ! [[ "$PLANNER_REPLANNER_MAX_TOKENS" =~ ^[0-9]+$ ]] || (( PLANNER_REPLANNER_MAX_TOKENS <= 0 )); then
+    echo "PLANNER_REPLANNER_MAX_TOKENS must be a positive integer." >&2
+    exit 2
+  fi
 fi
 
 if [[ ! -f "$DATASET" ]]; then
@@ -481,26 +557,58 @@ fi
 cd "$SERVER_REPO_ROOT"
 stop_existing_replay_processes
 
+# MODE=mock: launch the built-in mock policy server instead of the real pi0 server.
+# Honors PI0_HOST/PI0_PORT as set by the user (no silent overrides). The EXIT trap
+# ensures the background mock process is cleaned up when the script exits.
+MOCK_PI0_PID=""
+if [[ "$MODE" == "mock" ]]; then
+  echo "Starting mock policy server on ws://$PI0_HOST:$PI0_PORT ..."
+  "$PYTHON_CMD" -m examples.piper_real.mock_policy_server \
+    --host "$PI0_HOST" --port "$PI0_PORT" &
+  MOCK_PI0_PID="$!"
+  echo "Mock policy server PID: $MOCK_PI0_PID"
+
+  trap 'if [[ -n "$MOCK_PI0_PID" ]] && kill -0 "$MOCK_PI0_PID" 2>/dev/null; then
+    echo "Stopping mock policy server (PID $MOCK_PI0_PID)."
+    kill "$MOCK_PI0_PID" 2>/dev/null || true
+  fi' EXIT
+fi
+
 EFFECTIVE_START_TARGET="$START_TARGET"
-if [[ "$REPLAY_MODE" == "hybrid" && "$START_SERVERS" == "1" && "$MODE" != "none" && "$EFFECTIVE_START_TARGET" == "pi0" ]]; then
+if [[ "$REPLAY_MODE" == "hybrid" && "$START_SERVERS" == "1" && "$MODE" != "none" && "$MODE" != "mock" && "$EFFECTIVE_START_TARGET" == "pi0" ]]; then
   echo "REPLAY_MODE=hybrid requires planner + pi0; promoting START_TARGET=pi0 to all."
   EFFECTIVE_START_TARGET="all"
 fi
 
-if [[ "$START_SERVERS" == "1" && "$MODE" != "none" ]]; then
+if [[ "$START_SERVERS" == "1" && "$MODE" != "none" && "$MODE" != "mock" ]]; then
   case "$EFFECTIVE_START_TARGET" in
     pi0)
+      if [[ "$NEED_PI0" != "1" ]]; then
+        echo "START_TARGET=pi0 is not applicable for REPLAY_MODE=$REPLAY_MODE." >&2
+        exit 1
+      fi
       if [[ "$MODE" == "local" ]]; then
         bash "$SCRIPT_DIR/start_pi0_server_local.sh"
       else
         bash "$SCRIPT_DIR/start_pi0_server.sh"
       fi
       ;;
+    planner)
+      if [[ "$NEED_PLANNER" != "1" ]]; then
+        echo "START_TARGET=planner is not applicable for REPLAY_MODE=$REPLAY_MODE." >&2
+        exit 1
+      fi
+      if [[ "$MODE" == "local" ]]; then
+        bash "$SCRIPT_DIR/start_vllm_server_local.sh"
+      else
+        bash "$SCRIPT_DIR/start_vllm_server.sh"
+      fi
+      ;;
     all)
       bash "$SCRIPT_DIR/start_servers.sh" "$MODE"
       ;;
     *)
-      echo "Unsupported START_TARGET='$START_TARGET'. Expected 'pi0' or 'all'." >&2
+      echo "Unsupported START_TARGET='$START_TARGET'. Expected 'pi0', 'planner', or 'all'." >&2
       exit 1
       ;;
   esac
@@ -508,20 +616,35 @@ else
   echo "Skipping server startup."
 fi
 
-wait_for_pi0_ready "$PI0_HOST" "$PI0_PORT"
-if [[ "$REPLAY_MODE" == "hybrid" ]]; then
+if [[ "$NEED_PI0" == "1" ]]; then
+  wait_for_pi0_ready "$PI0_HOST" "$PI0_PORT"
+fi
+if [[ "$NEED_PLANNER" == "1" ]]; then
   wait_for_planner_ready "$PLANNER_BASE_URL" "$PLANNER_MODEL"
 fi
 
 cmd=(
   "$PYTHON_CMD" -m examples.piper_real.main
-  --host "$PI0_HOST"
-  --port "$PI0_PORT"
   --prompt "$PROMPT"
   --replay-dataset "$DATASET"
   --replay-mode "$REPLAY_MODE"
   --max-episode-steps "$MAX_EPISODE_STEPS"
 )
+
+if [[ "$NEED_PI0" == "1" ]]; then
+  cmd+=(--host "$PI0_HOST" --port "$PI0_PORT")
+fi
+
+if [[ "$REPLAY_MODE" == "planner" ]]; then
+  cmd+=(
+    --use-llm-planner
+    --planner.base-url "$PLANNER_BASE_URL"
+    --planner.model "$PLANNER_MODEL"
+  )
+  if [[ "$NAVIGATION_ONLY" == "1" ]]; then
+    cmd+=(--navigation-only)
+  fi
+fi
 
 if [[ "$REPLAY_MODE" == "hybrid" ]]; then
   cmd+=(
@@ -530,6 +653,27 @@ if [[ "$REPLAY_MODE" == "hybrid" ]]; then
     --replay-manipulate-max-steps "$MANIPULATE_MAX_STEPS"
     --replay-manipulate-replan-interval-steps "$MANIPULATE_REPLAN_INTERVAL_STEPS"
   )
+  if [[ -n "$PLANNER_REPLANNER_ENABLE_THINKING" ]]; then
+    if [[ "$PLANNER_REPLANNER_ENABLE_THINKING" == "1" ]]; then
+      cmd+=(--planner.manipulation-replanner-enable-thinking)
+    else
+      cmd+=(--planner.no-manipulation-replanner-enable-thinking)
+    fi
+  fi
+  if [[ -n "$PLANNER_REPLANNER_MAX_TOKENS" ]]; then
+    cmd+=(--planner.manipulation-replanner-max-tokens "$PLANNER_REPLANNER_MAX_TOKENS")
+  fi
+  if [[ -n "$REPLAY_TASK_SPEC" ]]; then
+    cmd+=(--planner.task-spec-path "$REPLAY_TASK_SPEC")
+  fi
+fi
+
+if [[ "$VISUALIZE" == "1" ]]; then
+  cmd+=(--visualize)
+fi
+
+if [[ -n "$SAVE_PATH" ]]; then
+  cmd+=(--save-path "$SAVE_PATH")
 fi
 
 if [[ "${#MAIN_ARGS[@]}" -gt 0 ]]; then
@@ -538,19 +682,31 @@ fi
 
 echo "Mode: $MODE"
 echo "Replay mode: $REPLAY_MODE"
-echo "PI0 host: $PI0_HOST"
-echo "PI0 port: $PI0_PORT"
+if [[ "$NEED_PI0" == "1" ]]; then
+  echo "PI0 host: $PI0_HOST"
+  echo "PI0 port: $PI0_PORT"
+fi
 echo "Dataset: $DATASET"
 echo "Task name: ${TASK_NAME:-<unset>}"
 echo "Prompt: $PROMPT"
 echo "Prompt source: $PROMPT_SOURCE"
 echo "Max episode steps: $MAX_EPISODE_STEPS"
-if [[ "$REPLAY_MODE" == "hybrid" ]]; then
+if [[ "$NEED_PLANNER" == "1" ]]; then
   echo "Planner base URL: $PLANNER_BASE_URL"
   echo "Planner model: $PLANNER_MODEL"
+fi
+if [[ "$REPLAY_MODE" == "planner" ]]; then
+  echo "Navigation only: $NAVIGATION_ONLY"
+fi
+if [[ "$REPLAY_MODE" == "hybrid" ]]; then
   echo "Manipulate max steps: $MANIPULATE_MAX_STEPS"
   echo "Manipulate replan interval steps: $MANIPULATE_REPLAN_INTERVAL_STEPS"
+  echo "Manipulation replanner enable thinking: ${PLANNER_REPLANNER_ENABLE_THINKING:-<default>}"
+  echo "Manipulation replanner max tokens: ${PLANNER_REPLANNER_MAX_TOKENS:-<default>}"
+  echo "Replay task spec: ${REPLAY_TASK_SPEC:-<unset>}"
 fi
+echo "Visualize: $VISUALIZE"
+echo "Save path: ${SAVE_PATH:-<unset>}"
 echo "Python: $PYTHON_CMD"
 echo "openpi_client src: $OPENPI_CLIENT_SRC"
 echo "Start target: $EFFECTIVE_START_TARGET"
