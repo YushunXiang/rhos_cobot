@@ -318,7 +318,7 @@ class ReplayVisualizer:
             self._total_subtasks = total_subtasks
             self._subtask_type = subtask_type
             self._subtask_prompt = subtask_prompt
-        self._extra_info = extra_info
+            self._extra_info = extra_info
 
     def update(self, step: int, *, extra_info: str = "") -> bool:
         """Push a new frame to the web UI.  Always returns ``True``."""
@@ -362,6 +362,7 @@ class ReplayVisualizer:
             with self._lock:
                 self._done = True
             self._server.shutdown()
+            self._server.server_close()
             logging.info("Replay visualizer: server stopped.")
         if self._writer is not None:
             self._writer.release()
@@ -500,7 +501,9 @@ class ReplayVisualizer:
         with self._lock:
             cameras = [
                 {"name": name, "jpeg_b64": base64.b64encode(data).decode()}
-                for name, data in self._camera_jpegs.items()
+                for name in self._cam_names
+                for data in [self._camera_jpegs.get(name)]
+                if data is not None
             ]
             state = {
                 "step": self._step,
