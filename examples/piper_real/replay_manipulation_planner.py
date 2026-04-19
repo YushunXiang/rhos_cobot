@@ -76,13 +76,14 @@ class ReplayManipulationPromptPlanner:
         response = self.client.chat.completions.create(
             model=self.config.model,
             temperature=0,
+            response_format={"type": "json_object"},
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "You are a manipulation-stage replanner for a mobile manipulation robot. "
                         "Your job is to choose the next short language instruction for the arm policy. "
-                        "Return JSON only with no markdown. "
+                        "Return JSON only with no markdown, no prose, and no thinking process. "
                         "Allowed outputs are: "
                         "{\"action\":\"continue\",\"prompt\":str,\"reason\":str} "
                         "or {\"action\":\"complete\",\"reason\":str}. "
@@ -104,7 +105,12 @@ class ReplayManipulationPromptPlanner:
         except ValueError as exc:
             raise ManipulationPromptPlannerError(str(exc)) from exc
 
-        payload = json.loads(raw_json)
+        try:
+            payload = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            raise ManipulationPromptPlannerError(
+                f"manipulation replanner returned invalid JSON: {raw_json[:400]}"
+            ) from exc
         if not isinstance(payload, dict):
             raise ManipulationPromptPlannerError("manipulation replanner response must be a JSON object")
         decision = self._normalize_decision(payload)

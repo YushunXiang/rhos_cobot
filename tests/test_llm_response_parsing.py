@@ -15,6 +15,23 @@ def test_extract_message_json_text_reads_reasoning_when_content_is_none():
     assert raw_json == message["reasoning"]
 
 
+def test_extract_message_json_text_skips_invalid_json_examples_before_valid_payload():
+    from examples.piper_real.llm_utils import extract_message_json_text
+
+    message = {
+        "content": (
+            "Thinking Process:\n"
+            "Format: {\"subtasks\": [{\"type\": \"navigate\"|\"manipulate\", \"prompt\": \"...\"}]}\n"
+            "{\"subtasks\":[{\"type\":\"navigate\",\"prompt\":\"Move to the sink\"}]}"
+        ),
+    }
+
+    raw_text, raw_json = extract_message_json_text(message)
+
+    assert raw_text == message["content"]
+    assert raw_json == '{"subtasks":[{"type":"navigate","prompt":"Move to the sink"}]}'
+
+
 def test_task_decomposer_accepts_reasoning_only_responses(monkeypatch):
     from examples.piper_real.planner_config import PlannerConfig
     from examples.piper_real.task_decomposer import TaskDecomposer
@@ -41,6 +58,65 @@ def test_task_decomposer_accepts_reasoning_only_responses(monkeypatch):
         ("navigate", "Move to the table"),
         ("manipulate", "Pick up the red cup"),
     ]
+
+
+def test_task_decomposer_requests_json_object_response_format(monkeypatch):
+    from examples.piper_real.planner_config import PlannerConfig
+    from examples.piper_real.task_decomposer import TaskDecomposer
+
+    captured: dict[str, object] = {}
+    decomposer = TaskDecomposer(PlannerConfig(base_url="http://unused", model="test"))
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content='{"subtasks":[{"type":"navigate","prompt":"Move to the table"}]}',
+                    reasoning=None,
+                )
+            )
+        ]
+    )
+
+    def _fake_create(**kwargs):
+        captured.update(kwargs)
+        return response
+
+    monkeypatch.setattr(decomposer.client.chat.completions, "create", _fake_create)
+
+    subtasks = decomposer.decompose("Move to the table.")
+
+    assert [(subtask.type, subtask.prompt) for subtask in subtasks] == [
+        ("navigate", "Move to the table"),
+    ]
+    assert captured["response_format"] == {"type": "json_object"}
+
+
+def test_task_decomposer_accepts_11_subtasks(monkeypatch):
+    from examples.piper_real.planner_config import PlannerConfig
+    from examples.piper_real.task_decomposer import TaskDecomposer
+
+    decomposer = TaskDecomposer(PlannerConfig(base_url="http://unused", model="test"))
+    subtasks_json = {
+        "subtasks": [
+            {"type": "navigate", "prompt": f"step {idx}"}
+            for idx in range(11)
+        ]
+    }
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=__import__("json").dumps(subtasks_json),
+                    reasoning=None,
+                )
+            )
+        ]
+    )
+    monkeypatch.setattr(decomposer.client.chat.completions, "create", lambda **_kwargs: response)
+
+    subtasks = decomposer.decompose("long task")
+
+    assert len(subtasks) == 11
 
 
 def test_replay_navigation_only_falls_back_to_single_navigate_subtask(monkeypatch):

@@ -60,12 +60,13 @@ class LLMNavigationPlanner:
         response = self.client.chat.completions.create(
             model=self.config.model,
             temperature=0,
+            response_format={"type": "json_object"},
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "You are a navigation planner for an AgileX TRACER robot. "
-                        "Return JSON only with no markdown. "
+                        "Return JSON only with no markdown, no prose, and no thinking process. "
                         "Allowed outputs are: "
                         "{\"action\":\"move\",\"linear_x\":float,\"angular_z\":float,\"duration\":float,\"reasoning\":str} "
                         "or {\"action\":\"stop\",\"reason\":str}. "
@@ -93,7 +94,10 @@ class LLMNavigationPlanner:
             raw_text, raw_json = extract_message_json_text(response.choices[0].message)
         except ValueError as exc:
             raise PlannerResponseError(str(exc)) from exc
-        payload = json.loads(raw_json)
+        try:
+            payload = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            raise PlannerResponseError(f"planner returned invalid JSON: {raw_json[:400]}") from exc
         if not isinstance(payload, dict):
             raise PlannerResponseError("planner response must be a JSON object")
         return raw_text, payload

@@ -4,7 +4,7 @@
 # Usage:
 #   bash scripts/run_piper_replay_mock.sh
 #   bash scripts/run_piper_replay_mock.sh local
-#   PI0_HOST=192.168.3.101 bash scripts/run_piper_replay_mock.sh remote
+#   bash scripts/run_piper_replay_mock.sh remote
 #   START_SERVERS=0 PYTHON_CMD=../openpi/.venv/bin/python bash scripts/run_piper_replay_mock.sh none --action-horizon 8
 
 set -euo pipefail
@@ -58,11 +58,12 @@ Environment overrides:
                      Policy-step interval between VLM prompt replans in hybrid mode
                      default: 16
   PI0_HOST           pi0 policy server host
-                     default: 127.0.0.1 for local/none; required for remote
+                     default: 127.0.0.1 for local/none; value from config/servers.toml for remote
   PI0_PORT           pi0 policy server port
                      default: value from config/servers.toml
   PLANNER_HOST       Planner server host for hybrid mode
-                     default: PI0_HOST when set; else 127.0.0.1 for local/none
+                     default: value from config/servers.toml for remote;
+                              else PI0_HOST when set; else 127.0.0.1 for local/none
   PLANNER_PORT       Planner server port for hybrid mode
                      default: value from config/servers.toml
   PLANNER_MODEL      Planner model name for hybrid mode
@@ -106,7 +107,7 @@ Examples:
   bash scripts/run_piper_replay_mock.sh --no-kill-existing-replay none
   REPLAY_MODE=planner START_TARGET=all bash scripts/run_piper_replay_mock.sh
   REPLAY_MODE=hybrid START_TARGET=all bash scripts/run_piper_replay_mock.sh
-  PI0_HOST=192.168.3.101 bash scripts/run_piper_replay_mock.sh remote
+  bash scripts/run_piper_replay_mock.sh remote
   START_TARGET=all bash scripts/run_piper_replay_mock.sh local
   START_SERVERS=0 PI0_HOST=127.0.0.1 PYTHON_CMD=../openpi/.venv/bin/python \\
     bash scripts/run_piper_replay_mock.sh none -- --action-horizon 8
@@ -422,10 +423,14 @@ OPENPI_CLIENT_SRC="${OPENPI_CLIENT_SRC:-}"
 
 if [[ -z "${PI0_HOST:-}" ]]; then
   if [[ "$MODE" == "remote" ]]; then
-    echo "PI0_HOST is required in remote mode. Use the robot workstation reachable address, not the SSH alias." >&2
-    exit 1
+    PI0_HOST="$(server_cfg_optional pi0.remote.host)"
+    if [[ -z "$PI0_HOST" ]]; then
+      echo "PI0_HOST is required in remote mode. Set PI0_HOST or configure pi0.remote.host in config/servers.toml." >&2
+      exit 1
+    fi
+  else
+    PI0_HOST="127.0.0.1"
   fi
-  PI0_HOST="127.0.0.1"
 fi
 
 if ! [[ "$MANIPULATE_MAX_STEPS" =~ ^[0-9]+$ ]] || (( MANIPULATE_MAX_STEPS <= 0 )); then
@@ -443,11 +448,14 @@ if [[ "$REPLAY_MODE" == "hybrid" ]]; then
   PLANNER_PORT="${PLANNER_PORT:-$(server_cfg vllm.port)}"
 
   if [[ -z "${PLANNER_HOST:-}" ]]; then
-    if [[ -n "${PI0_HOST:-}" ]]; then
+    if [[ "$MODE" == "remote" ]]; then
+      PLANNER_HOST="$(server_cfg_optional vllm.remote.host)"
+      if [[ -z "$PLANNER_HOST" ]]; then
+        echo "PLANNER_HOST is required in remote mode for REPLAY_MODE=hybrid. Set PLANNER_HOST or configure vllm.remote.host in config/servers.toml." >&2
+        exit 1
+      fi
+    elif [[ -n "${PI0_HOST:-}" ]]; then
       PLANNER_HOST="$PI0_HOST"
-    elif [[ "$MODE" == "remote" ]]; then
-      echo "PLANNER_HOST is required in remote mode for REPLAY_MODE=hybrid." >&2
-      exit 1
     else
       PLANNER_HOST="127.0.0.1"
     fi

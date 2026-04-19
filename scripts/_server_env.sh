@@ -15,6 +15,10 @@ server_cfg() {
   python3 "$SERVER_HELPER_DIR/_read_toml.py" "$SERVER_CONFIG" "$1"
 }
 
+server_cfg_optional() {
+  python3 "$SERVER_HELPER_DIR/_read_toml.py" "$SERVER_CONFIG" "$1" 2>/dev/null || true
+}
+
 server_require_config() {
   if [[ -f "$SERVER_CONFIG" ]]; then
     return 0
@@ -93,4 +97,17 @@ server_lookup_task_prompt() {
   python3 "$SERVER_HELPER_DIR/_resolve_task_prompt.py" \
     "$SERVER_TASK_PROMPT_CATALOG" \
     "$task_name"
+}
+
+server_remote_ssh_target() {
+  local service_name="$1"
+  local ssh_target
+
+  ssh_target="$(server_cfg_optional "$service_name.remote.ssh_target")"
+  if [[ -n "$ssh_target" ]]; then
+    printf '%s\n' "$ssh_target"
+    return 0
+  fi
+
+  server_cfg "$service_name.remote.host"
 }

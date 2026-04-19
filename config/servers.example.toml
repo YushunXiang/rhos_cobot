@@ -9,8 +9,11 @@
 policy_config = "your_policy_config"
 port = 8001
 
+# host is the Pi0 websocket address reachable from this machine.
+# ssh_target is the optional SSH alias/target used to manage the remote tmux session.
 [pi0.remote]
-host = "your-pi0-host"
+host = "your-pi0-service-host"
+ssh_target = "your-pi0-ssh-target"
 session_name = "pi0-infer"
 work_dir = "/path/to/openpi-or-inference-repo"
 policy_config = "your_policy_config"
@@ -30,8 +33,11 @@ cuda_visible_devices = "0"
 port = 8000
 host = "0.0.0.0"
 
+# host is the planner HTTP address reachable from this machine.
+# ssh_target is the optional SSH alias/target used to manage the remote tmux session.
 [vllm.remote]
-host = "your-vllm-host"
+host = "your-vllm-service-host"
+ssh_target = "your-vllm-ssh-target"
 session_name = "vllm-planner"
 work_dir = "/path/to/llm-planner"
 model_path = "/path/to/model-or-hf-cache"

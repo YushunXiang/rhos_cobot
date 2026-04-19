@@ -9,33 +9,33 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CONFIG="$REPO_ROOT/config/servers.toml"
-
-_cfg() { python3 "$SCRIPT_DIR/_read_toml.py" "$CONFIG" "$1"; }
+source "$SCRIPT_DIR/_server_env.sh"
 
 MODE="${1:-local}"
+server_require_config
 
 kill_local_sessions() {
   local vllm_session pi0_session
-  vllm_session="$(_cfg vllm.local.session_name)"
-  pi0_session="$(_cfg pi0.local.session_name)"
+  vllm_session="$(server_cfg vllm.local.session_name)"
+  pi0_session="$(server_cfg pi0.local.session_name)"
   echo "Killing local tmux sessions: $vllm_session, $pi0_session"
   tmux kill-session -t "$vllm_session" 2>/dev/null || true
   tmux kill-session -t "$pi0_session" 2>/dev/null || true
 }
 
 kill_remote_sessions() {
-  local remote_host session
-  remote_host="$(_cfg vllm.remote.host)"
-  session="$(_cfg vllm.remote.session_name)"
-  echo "Killing remote tmux session: $session on $remote_host"
-  ssh "$remote_host" "tmux kill-session -t $session 2>/dev/null || true"
+  local remote_host session ssh_target
+  remote_host="$(server_cfg vllm.remote.host)"
+  ssh_target="$(server_remote_ssh_target vllm)"
+  session="$(server_cfg vllm.remote.session_name)"
+  echo "Killing remote tmux session: $session for planner host $remote_host via SSH target $ssh_target"
+  ssh "$ssh_target" "tmux kill-session -t $session 2>/dev/null || true"
 
-  remote_host="$(_cfg pi0.remote.host)"
-  session="$(_cfg pi0.remote.session_name)"
-  echo "Killing remote tmux session: $session on $remote_host"
-  ssh "$remote_host" "tmux kill-session -t $session 2>/dev/null || true"
+  remote_host="$(server_cfg pi0.remote.host)"
+  ssh_target="$(server_remote_ssh_target pi0)"
+  session="$(server_cfg pi0.remote.session_name)"
+  echo "Killing remote tmux session: $session for Pi0 host $remote_host via SSH target $ssh_target"
+  ssh "$ssh_target" "tmux kill-session -t $session 2>/dev/null || true"
 }
 
 case "$MODE" in

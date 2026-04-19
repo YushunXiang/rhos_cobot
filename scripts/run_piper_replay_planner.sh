@@ -4,7 +4,7 @@
 # Usage:
 #   bash scripts/run_piper_replay_planner.sh
 #   bash scripts/run_piper_replay_planner.sh local
-#   PLANNER_HOST=192.168.3.123 bash scripts/run_piper_replay_planner.sh remote
+#   bash scripts/run_piper_replay_planner.sh remote
 #   START_SERVERS=0 bash scripts/run_piper_replay_planner.sh none -- --planner.model Qwen/Qwen3.5-4B
 
 set -euo pipefail
@@ -46,7 +46,7 @@ Environment overrides:
   MAX_EPISODE_STEPS  Replay frame limit forwarded to --max-episode-steps
                      default: 0 (use full dataset)
   PLANNER_HOST       Planner server host
-                     default: 127.0.0.1 for local/none; required for remote
+                     default: 127.0.0.1 for local/none; value from config/servers.toml for remote
   PLANNER_PORT       Planner server port
                      default: value from config/servers.toml
   PLANNER_MODEL      Planner model name
@@ -79,7 +79,7 @@ Examples:
   bash scripts/run_piper_replay_planner.sh
   bash scripts/run_piper_replay_planner.sh --replay-kill-grace-sec 10
   START_TARGET=all bash scripts/run_piper_replay_planner.sh local
-  PLANNER_HOST=192.168.3.123 bash scripts/run_piper_replay_planner.sh remote
+  bash scripts/run_piper_replay_planner.sh remote
   START_SERVERS=0 bash scripts/run_piper_replay_planner.sh none -- --skip-server-checks
 EOF
 }
@@ -279,10 +279,14 @@ server_export_openpi_pythonpath "$OPENPI_CLIENT_SRC"
 PLANNER_PORT="${PLANNER_PORT:-$(server_cfg vllm.port)}"
 if [[ -z "${PLANNER_HOST:-}" ]]; then
   if [[ "$MODE" == "remote" ]]; then
-    echo "PLANNER_HOST is required in remote mode. Use the robot workstation reachable address, not the SSH alias." >&2
-    exit 1
+    PLANNER_HOST="$(server_cfg_optional vllm.remote.host)"
+    if [[ -z "$PLANNER_HOST" ]]; then
+      echo "PLANNER_HOST is required in remote mode. Set PLANNER_HOST or configure vllm.remote.host in config/servers.toml." >&2
+      exit 1
+    fi
+  else
+    PLANNER_HOST="127.0.0.1"
   fi
-  PLANNER_HOST="127.0.0.1"
 fi
 
 if [[ -z "${PLANNER_MODEL:-}" ]]; then

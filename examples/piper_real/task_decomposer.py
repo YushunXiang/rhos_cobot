@@ -9,7 +9,7 @@ from openai import OpenAI
 from examples.piper_real.llm_utils import extract_message_json_text
 from examples.piper_real.planner_config import PlannerConfig
 
-_MAX_SUBTASKS = 10
+_MAX_SUBTASKS = 16
 _MAX_ATTEMPTS = 4
 
 _VALID_TYPES = {"navigate", "manipulate"}
@@ -19,13 +19,14 @@ _SYSTEM_PROMPT = (
     "Given a task description, decompose it into an ordered list of subtasks. "
     "Each subtask is either 'navigate' (move the robot base to a location) "
     "or 'manipulate' (use the robot arms to interact with an object). "
-    "Return JSON only with no markdown. "
+    "Return JSON only with no markdown, no prose, and no thinking process. "
     "Format: {\"subtasks\": [{\"type\": \"navigate\"|\"manipulate\", \"prompt\": \"...\"}]}. "
     "Rules: "
     "- If the task requires moving to a location first, start with a navigate subtask. "
     "- If the robot is already at the right location, use only manipulate subtasks. "
     "- A single manipulate subtask with no navigation is valid. "
-    "- Keep the list concise; do not exceed 10 subtasks. "
+    "- Keep the list concise; do not exceed 16 subtasks. "
+    "- Prefer combining consecutive manipulation actions that happen in the same workspace into one manipulate subtask. "
     "- Each prompt should be a clear, self-contained instruction."
 )
 
@@ -64,6 +65,7 @@ class TaskDecomposer:
         response = self.client.chat.completions.create(
             model=self.config.model,
             temperature=0,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": task_prompt},
@@ -71,7 +73,10 @@ class TaskDecomposer:
         )
         raw_text, raw_json = extract_message_json_text(response.choices[0].message)
         logging.debug("Task decomposer raw LLM response: %s", raw_text)
-        payload = json.loads(raw_json)
+        try:
+            payload = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"task decomposer returned invalid JSON: {raw_json[:400]}") from exc
 
         subtasks_raw = payload["subtasks"]
         if not isinstance(subtasks_raw, list) or len(subtasks_raw) == 0:
