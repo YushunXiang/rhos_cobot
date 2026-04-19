@@ -9,6 +9,19 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONFIG="$REPO_ROOT/config/servers.toml"
 
 _cfg() { python3 "$SCRIPT_DIR/_read_toml.py" "$CONFIG" "$1"; }
+_cfg_optional() { python3 "$SCRIPT_DIR/_read_toml.py" "$CONFIG" "$1" 2>/dev/null || true; }
+
+DEFAULT_VLLM_MAX_MODEL_LEN="$(_cfg_optional vllm.local.max_model_len)"
+if [[ -z "$DEFAULT_VLLM_MAX_MODEL_LEN" ]]; then
+  DEFAULT_VLLM_MAX_MODEL_LEN="262144"
+fi
+
+DEFAULT_VLLM_MAX_NUM_SEQS="$(_cfg_optional vllm.local.max_num_seqs)"
+if [[ -z "$DEFAULT_VLLM_MAX_NUM_SEQS" ]]; then
+  DEFAULT_VLLM_MAX_NUM_SEQS="512"
+fi
+
+DEFAULT_VLLM_GPU_MEMORY_UTILIZATION="$(_cfg_optional vllm.local.gpu_memory_utilization)"
 
 SESSION_NAME="${SESSION_NAME:-$(_cfg vllm.local.session_name)}"
 MODEL_PATH="${MODEL_PATH:-$(_cfg vllm.local.model_path)}"
@@ -19,8 +32,26 @@ VLLM_CMD="${VLLM_CMD:-vllm}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-$(_cfg vllm.local.conda_env_name)}"
 CONDA_BASE="${CONDA_BASE:-$(conda info --base 2>/dev/null || true)}"
 CONDA_SH="${CONDA_SH:-${CONDA_BASE:+$CONDA_BASE/etc/profile.d/conda.sh}}"
+VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-$DEFAULT_VLLM_MAX_MODEL_LEN}"
+VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-$DEFAULT_VLLM_MAX_NUM_SEQS}"
+VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_VLLM_GPU_MEMORY_UTILIZATION}"
+
+validate_positive_int() {
+  local name="$1"
+  local value="$2"
+
+  if ! [[ "$value" =~ ^[0-9]+$ ]] || (( value <= 0 )); then
+    echo "$name must be a positive integer." >&2
+    exit 2
+  fi
+}
 
 run_server() {
+  local -a serve_args
+
+  validate_positive_int "VLLM_MAX_MODEL_LEN" "$VLLM_MAX_MODEL_LEN"
+  validate_positive_int "VLLM_MAX_NUM_SEQS" "$VLLM_MAX_NUM_SEQS"
+
   # shellcheck source=/dev/null
   source "$CONDA_SH"
   conda activate "$CONDA_ENV_NAME"
@@ -35,12 +66,20 @@ run_server() {
     exit 1
   fi
 
-  "$VLLM_CMD" serve "$MODEL_PATH" \
-    --served-model-name "$SERVED_MODEL_NAME" \
-    --max-model-len 262144 \
-    --reasoning-parser qwen3 \
-    --host "$HOST" \
+  serve_args=(
+    serve "$MODEL_PATH"
+    --served-model-name "$SERVED_MODEL_NAME"
+    --max-model-len "$VLLM_MAX_MODEL_LEN"
+    --max-num-seqs "$VLLM_MAX_NUM_SEQS"
+    --reasoning-parser qwen3
+    --host "$HOST"
     --port "$PORT"
+  )
+  if [[ -n "$VLLM_GPU_MEMORY_UTILIZATION" ]]; then
+    serve_args+=(--gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION")
+  fi
+
+  "$VLLM_CMD" "${serve_args[@]}"
 }
 
 if [[ "${1:-}" == "__run_inside_tmux" ]]; then
@@ -79,6 +118,9 @@ for var_name in \
   SERVED_MODEL_NAME \
   HOST \
   PORT \
+  VLLM_MAX_MODEL_LEN \
+  VLLM_MAX_NUM_SEQS \
+  VLLM_GPU_MEMORY_UTILIZATION \
   CONDA_ENV_NAME \
   CONDA_BASE \
   CONDA_SH \

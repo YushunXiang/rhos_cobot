@@ -3,8 +3,15 @@
 #!/usr/bin/python3
 """
 import dataclasses
+import json
 import logging
+import os
+from pathlib import Path
+import re
+import textwrap
+import time
 
+import cv2
 import numpy as np
 
 import tyro
@@ -20,6 +27,49 @@ DEFAULT_REPLAY_MANIPULATE_MAX_STEPS = 64
 DEFAULT_REPLAY_MANIPULATE_REPLAN_INTERVAL_STEPS = 16
 _VALID_REPLAY_MODES = {"policy", "planner", "hybrid"}
 
+
+@dataclasses.dataclass(frozen=True)
+class ReplayProgressDecision:
+    event: str
+    progress: float
+    detail: str = ""
+
+
+class ReplayTaskProgressTracker:
+    def __init__(
+        self,
+        *,
+        complete_threshold: float,
+        stall_threshold: float,
+        stall_steps: int,
+        regression_threshold: float,
+    ) -> None:
+        self._complete_threshold = complete_threshold
+        self._stall_threshold = stall_threshold
+        self._stall_steps = stall_steps
+        self._regression_threshold = regression_threshold
+        self._values: list[float] = []
+        self._max_progress: float = 0.0
+
+    def observe(self, progress: float) -> ReplayProgressDecision:
+        value = float(progress)
+        self._values.append(value)
+        self._max_progress = max(self._max_progress, value)
+
+        if value >= self._complete_threshold:
+            return ReplayProgressDecision("complete", value, "progress threshold reached")
+
+        if value < self._max_progress - self._regression_threshold:
+            return ReplayProgressDecision("regression", value, "progress regressed")
+
+        if len(self._values) >= self._stall_steps:
+            window = self._values[-self._stall_steps :]
+            if max(window) - min(window) < self._stall_threshold:
+                return ReplayProgressDecision("stall", value, "progress stalled")
+
+        return ReplayProgressDecision("continue", value)
+
+
 @dataclasses.dataclass
 class Args:
     host: str = "10.42.0.2"  # H100
@@ -32,12 +82,25 @@ class Args:
     replay_dataset: str = ""  # Path to HDF5 episode file for offline replay
     replay_mode: str = "policy"  # policy | planner | hybrid
     replay_manipulate_max_steps: int = DEFAULT_REPLAY_MANIPULATE_MAX_STEPS
-    replay_manipulate_replan_interval_steps: int = DEFAULT_REPLAY_MANIPULATE_REPLAN_INTERVAL_STEPS
+    replay_manipulate_replan_interval_steps: int = (
+        DEFAULT_REPLAY_MANIPULATE_REPLAN_INTERVAL_STEPS
+    )
     use_llm_planner: bool = False
     use_robot_base: bool = False
     navigation_only: bool = False  # Run navigation only, skip manipulation
     skip_server_checks: bool = False
     server_check_timeout_sec: float = 5.0
+    visualize: bool = (
+        False  # Show camera views + subtask overlay during replay (web UI)
+    )
+    visualize_port: int = 7860  # Port for the visualization web server
+    save_path: str = ""  # Optional MP4 output path synchronized with visualize updates
+    replay_debug_export_dir: str = (
+        ""  # Optional directory for hit-cap prompt/frame debug exports
+    )
+    visualize_playback_rate: float = (
+        1.0  # Relative replay visualization speed (1.0 = dataset FPS)
+    )
     planner: PlannerConfig = dataclasses.field(default_factory=PlannerConfig)
 
 
@@ -48,12 +111,14 @@ def _create_policy_agent(args: Args) -> _policy_agent.PolicyAgent:
     )
     metadata = ws_client_policy.get_server_metadata()
     logging.info("Server metadata: %s", metadata)
-    return _policy_agent.PolicyAgent(
+    agent = _policy_agent.PolicyAgent(
         policy=action_chunk_broker.ActionChunkBroker(
             policy=ws_client_policy,
             action_horizon=args.action_horizon,
         )
     )
+    agent.policy_metadata = metadata
+    return agent
 
 
 def _run_required_server_checks(
@@ -127,17 +192,57 @@ def _resolve_replay_mode(args: Args) -> str:
             f"--replay-mode must be one of {sorted(_VALID_REPLAY_MODES)}, got {args.replay_mode!r}."
         )
     if args.use_llm_planner and replay_mode == "policy":
-        logging.info("Replay mode inferred as planner from legacy --use-llm-planner flag.")
+        logging.info(
+            "Replay mode inferred as planner from legacy --use-llm-planner flag."
+        )
         return "planner"
     return replay_mode
 
 
-def _build_replay_subtask_list(args: Args, prompt: str):
+def _build_replay_ordered_task_memory_runtime(args: Args, environment):
+    task_spec_path = args.planner.task_spec_path.strip()
+    if not task_spec_path:
+        return None
+
+    from examples.piper_real import replay_task_memory as _replay_task_memory
+
+    try:
+        runtime = _replay_task_memory.ReplayOrderedTaskMemoryRuntime(
+            environment,
+            args.planner,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logging.error(
+            "Replay hybrid could not initialize ordered task memory from %s: %s",
+            task_spec_path,
+            exc,
+        )
+        return None
+
+    logging.info("Replay hybrid ordered task memory enabled: %s", task_spec_path)
+    return runtime
+
+
+def _build_replay_subtask_list(args: Args, prompt: str, ordered_task_memory_runtime=None):
     from examples.piper_real import task_decomposer as _task_decomposer
 
     decomposer = _task_decomposer.TaskDecomposer(args.planner)
+    decompose_kwargs: dict[str, str] = {}
+    if ordered_task_memory_runtime is not None:
+        try:
+            decompose_kwargs = ordered_task_memory_runtime.build_context()
+        except Exception as exc:  # noqa: BLE001
+            logging.warning(
+                "Replay decomposition is proceeding without ordered task memory context: %s",
+                exc,
+            )
+            decompose_kwargs = {}
+
     try:
-        subtask_list = decomposer.decompose(prompt)
+        if decompose_kwargs:
+            subtask_list = decomposer.decompose(prompt, **decompose_kwargs)
+        else:
+            subtask_list = decomposer.decompose(prompt)
     except _task_decomposer.DecompositionError as exc:
         if args.navigation_only:
             logging.warning(
@@ -149,7 +254,9 @@ def _build_replay_subtask_list(args: Args, prompt: str):
         logging.error("Task decomposition failed: %s", exc)
         return None
 
-    if args.navigation_only and not any(subtask.type == "navigate" for subtask in subtask_list):
+    if args.navigation_only and not any(
+        subtask.type == "navigate" for subtask in subtask_list
+    ):
         logging.warning(
             "Replay decomposition returned no navigate subtasks; "
             "using the original prompt as a single navigate subtask."
@@ -157,6 +264,202 @@ def _build_replay_subtask_list(args: Args, prompt: str):
         return [_task_decomposer.Subtask(type="navigate", prompt=prompt)]
 
     return subtask_list
+
+
+def _resolve_replay_debug_export_dir(args: Args) -> str:
+    explicit_dir = args.replay_debug_export_dir.strip()
+    if explicit_dir:
+        return explicit_dir
+
+    if args.save_path.strip():
+        save_path = Path(args.save_path)
+        stem_path = save_path.with_suffix("")
+        return str(stem_path.parent / f"{stem_path.name}_debug")
+
+    return os.path.join("outputs", "replay_debug")
+
+
+def _sanitize_debug_path_component(raw_text: str, *, max_len: int = 48) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", raw_text.strip().lower()).strip("_")
+    if not slug:
+        return "subtask"
+    return slug[:max_len]
+
+
+def _compose_replay_debug_frame(
+    environment,
+    *,
+    frame_idx: int,
+    header_lines: list[str],
+) -> np.ndarray:
+    bgr_frames: list[np.ndarray] = []
+    for cam_name in environment.camera_names:
+        frame = environment.get_image(cam_name, frame_idx)
+        if frame.ndim == 3 and frame.shape[2] == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        canvas = frame.copy()
+        cv2.rectangle(canvas, (0, 0), (canvas.shape[1], 36), (0, 0, 0), -1)
+        cv2.putText(
+            canvas,
+            cam_name,
+            (12, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        bgr_frames.append(canvas)
+
+    if not bgr_frames:
+        return np.zeros((360, 640, 3), dtype=np.uint8)
+
+    tile_h = max(frame.shape[0] for frame in bgr_frames)
+    tile_w = max(frame.shape[1] for frame in bgr_frames)
+    normalized: list[np.ndarray] = []
+    for frame in bgr_frames:
+        if frame.shape[:2] != (tile_h, tile_w):
+            frame = cv2.resize(frame, (tile_w, tile_h), interpolation=cv2.INTER_AREA)
+        normalized.append(frame)
+
+    rows: list[np.ndarray] = []
+    cols = 2
+    for start in range(0, len(normalized), cols):
+        row_frames = normalized[start : start + cols]
+        if len(row_frames) < cols:
+            row_frames.append(np.zeros_like(normalized[0]))
+        rows.append(cv2.hconcat(row_frames))
+    sheet = cv2.vconcat(rows)
+
+    wrapped_lines: list[str] = []
+    wrap_width = max(32, sheet.shape[1] // 14)
+    for line in header_lines:
+        wrapped_lines.extend(textwrap.wrap(line, width=wrap_width) or [""])
+
+    line_height = 24
+    header_height = max(44, 12 + len(wrapped_lines) * line_height)
+    header = np.zeros((header_height, sheet.shape[1], 3), dtype=np.uint8)
+    header[:] = (22, 22, 22)
+    y = 26
+    for line in wrapped_lines:
+        cv2.putText(
+            header,
+            line,
+            (12, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (245, 245, 245),
+            1,
+            cv2.LINE_AA,
+        )
+        y += line_height
+    return cv2.vconcat([header, sheet])
+
+
+def _export_replay_manipulation_cap_debug(
+    environment,
+    *,
+    export_base_dir: str,
+    subtask_prompt: str,
+    current_policy_prompt: str,
+    prompt_history: list[dict[str, object]],
+    subtask_start_cursor: int,
+    executed_steps: int,
+    max_steps: int,
+    subtask_index: int | None,
+    total_subtasks: int | None,
+) -> Path:
+    export_root = Path(export_base_dir)
+    subtask_prefix = (
+        f"subtask_{subtask_index:02d}"
+        if subtask_index is not None
+        else "subtask_unknown"
+    )
+    export_dir = export_root / f"{subtask_prefix}_{_sanitize_debug_path_component(subtask_prompt)}"
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    history_items = prompt_history[-5:]
+    if not history_items:
+        history_items = [
+            {
+                "policy_steps": executed_steps,
+                "prompt": current_policy_prompt,
+                "reason": "no_prompt_history_available",
+            }
+        ]
+
+    exported_history: list[dict[str, object]] = []
+    for item_idx, item in enumerate(history_items, start=1):
+        policy_steps = int(item.get("policy_steps", 0))
+        if policy_steps <= 0:
+            frame_idx = subtask_start_cursor
+        else:
+            frame_idx = min(
+                subtask_start_cursor + policy_steps - 1,
+                max(environment.num_steps - 1, 0),
+            )
+        image_name = f"prompt_{item_idx:02d}_step_{policy_steps:03d}.png"
+        image_path = export_dir / image_name
+        prompt_text = str(item.get("prompt", ""))
+        reason_text = str(item.get("reason", ""))
+        debug_frame = _compose_replay_debug_frame(
+            environment,
+            frame_idx=frame_idx,
+            header_lines=[
+                f"Subtask {subtask_index}/{total_subtasks} hit cap at {max_steps} steps",
+                f"Representative frame: replay step {frame_idx}",
+                f"Policy steps at replan: {policy_steps}",
+                f"Prompt: {prompt_text}",
+                f"Reason: {reason_text}",
+            ],
+        )
+        cv2.imwrite(str(image_path), debug_frame)
+        exported_history.append(
+            {
+                "policy_steps": policy_steps,
+                "prompt": prompt_text,
+                "reason": reason_text,
+                "frame_idx": frame_idx,
+                "image_path": str(image_path),
+            }
+        )
+
+    final_frame_idx = min(
+        max(subtask_start_cursor, environment.get_cursor() - 1),
+        max(environment.num_steps - 1, 0),
+    )
+    final_frame_path = export_dir / "final_frame.png"
+    final_frame = _compose_replay_debug_frame(
+        environment,
+        frame_idx=final_frame_idx,
+        header_lines=[
+            f"Subtask {subtask_index}/{total_subtasks} final frame at cap",
+            f"Replay step {final_frame_idx} | executed_steps={executed_steps} | max_steps={max_steps}",
+            f"Current policy prompt: {current_policy_prompt}",
+        ],
+    )
+    cv2.imwrite(str(final_frame_path), final_frame)
+
+    manifest = {
+        "subtask_index": subtask_index,
+        "total_subtasks": total_subtasks,
+        "subtask_prompt": subtask_prompt,
+        "subtask_start_cursor": subtask_start_cursor,
+        "executed_steps": executed_steps,
+        "max_steps": max_steps,
+        "final_cursor": environment.get_cursor(),
+        "final_frame_idx": final_frame_idx,
+        "current_policy_prompt": current_policy_prompt,
+        "camera_names": list(environment.camera_names),
+        "history_window_size": len(exported_history),
+        "recent_prompt_history": exported_history,
+        "final_frame_path": str(final_frame_path),
+    }
+    (export_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return export_dir
 
 
 def _run_replay_manipulation_subtask(
@@ -167,10 +470,29 @@ def _run_replay_manipulation_subtask(
     subtask_prompt: str,
     max_steps: int,
     replan_interval_steps: int,
+    progress_complete_threshold: float,
+    progress_stall_threshold: float,
+    progress_stall_steps: int,
+    progress_regression_threshold: float,
+    progress_confirm_with_replanner: bool,
+    debug_export_dir: str = "",
+    subtask_index: int | None = None,
+    total_subtasks: int | None = None,
+    visualizer=None,
 ) -> dict[str, object]:
     prompt_history: list[dict[str, object]] = []
     current_policy_prompt = subtask_prompt
     prompt_queries = 0
+    subtask_start_cursor = (
+        environment.get_cursor() if hasattr(environment, "get_cursor") else 0
+    )
+    has_progress_head = bool(getattr(agent, "policy_metadata", {}).get("has_progress_head", False))
+    progress_tracker = ReplayTaskProgressTracker(
+        complete_threshold=progress_complete_threshold,
+        stall_threshold=progress_stall_threshold,
+        stall_steps=progress_stall_steps,
+        regression_threshold=progress_regression_threshold,
+    )
 
     def _replan(policy_steps: int) -> bool:
         nonlocal current_policy_prompt
@@ -225,23 +547,92 @@ def _run_replay_manipulation_subtask(
         )
         return True
 
-    if not _replan(0):
-        return {
-            "executed_steps": 0,
-            "prompt_queries": prompt_queries,
-            "completed_by_replan": True,
-            "last_policy_prompt": current_policy_prompt,
-        }
+    if not has_progress_head:
+        if not _replan(0):
+            return {
+                "executed_steps": 0,
+                "prompt_queries": prompt_queries,
+                "completed": True,
+                "completed_by_replan": True,
+                "completed_by_progress": False,
+                "last_policy_prompt": current_policy_prompt,
+                "stop_reason": "replanner_complete",
+            }
+    else:
+        logging.info("Replay manipulate subtask is using progress-first mode with replanner fallback.")
 
     executed_steps = 0
+    aborted_by_user = False
     while executed_steps < max_steps and not environment.is_episode_complete():
         observation = environment.get_observation()
         action = agent.get_action(observation)
         environment.apply_action(action)
         executed_steps += 1
 
+        progress_value = action.get("progress")
+        if visualizer is not None:
+            step_idx = environment.get_cursor() - 1
+            if not visualizer.update(
+                step_idx, extra_info=f"policy prompt: {current_policy_prompt}"
+            ):
+                logging.info(
+                    "Replay manipulate aborted by user at policy step %d.",
+                    executed_steps,
+                )
+                aborted_by_user = True
+                break
+
+        if has_progress_head and progress_value is not None:
+            decision = progress_tracker.observe(float(progress_value))
+            logging.info(
+                "Replay manipulate progress step %d: progress=%.4f event=%s",
+                executed_steps,
+                decision.progress,
+                decision.event,
+            )
+            if decision.event == "complete":
+                if not progress_confirm_with_replanner:
+                    return {
+                        "executed_steps": executed_steps,
+                        "prompt_queries": prompt_queries,
+                        "completed": True,
+                        "completed_by_replan": False,
+                        "completed_by_progress": True,
+                        "last_policy_prompt": current_policy_prompt,
+                        "stop_reason": "progress_complete",
+                    }
+                if not _replan(executed_steps):
+                    return {
+                        "executed_steps": executed_steps,
+                        "prompt_queries": prompt_queries,
+                        "completed": True,
+                        "completed_by_replan": True,
+                        "completed_by_progress": False,
+                        "last_policy_prompt": current_policy_prompt,
+                        "stop_reason": "replanner_complete",
+                    }
+            elif decision.event in {"stall", "regression"}:
+                logging.warning(
+                    "Replay manipulate progress %s after %d policy steps at %.4f; falling back to replanner.",
+                    decision.event,
+                    executed_steps,
+                    decision.progress,
+                )
+                if not _replan(executed_steps):
+                    return {
+                        "executed_steps": executed_steps,
+                        "prompt_queries": prompt_queries,
+                        "completed": True,
+                        "completed_by_replan": True,
+                        "completed_by_progress": False,
+                        "last_policy_prompt": current_policy_prompt,
+                        "stop_reason": "replanner_complete",
+                    }
+                continue
+
         if (
-            executed_steps < max_steps
+            not has_progress_head
+            and executed_steps < max_steps
             and not environment.is_episode_complete()
             and executed_steps % replan_interval_steps == 0
             and not _replan(executed_steps)
@@ -249,20 +640,80 @@ def _run_replay_manipulation_subtask(
             return {
                 "executed_steps": executed_steps,
                 "prompt_queries": prompt_queries,
+                "completed": True,
                 "completed_by_replan": True,
+                "completed_by_progress": False,
                 "last_policy_prompt": current_policy_prompt,
+                "stop_reason": "replanner_complete",
+            }
+
+        if (
+            executed_steps < max_steps
+            and not environment.is_episode_complete()
+            and has_progress_head
+            and progress_value is None
+            and executed_steps % replan_interval_steps == 0
+            and not _replan(executed_steps)
+        ):
+            return {
+                "executed_steps": executed_steps,
+                "prompt_queries": prompt_queries,
+                "completed": True,
+                "completed_by_replan": True,
+                "completed_by_progress": False,
+                "last_policy_prompt": current_policy_prompt,
+                "stop_reason": "replanner_complete",
             }
 
     if executed_steps >= max_steps and not environment.is_episode_complete():
-        logging.info("Replay manipulate subtask hit fixed cap at %d policy steps.", max_steps)
+        logging.info(
+            "Replay manipulate subtask hit fixed cap at %d policy steps.", max_steps
+        )
+        if debug_export_dir:
+            try:
+                export_dir = _export_replay_manipulation_cap_debug(
+                    environment,
+                    export_base_dir=debug_export_dir,
+                    subtask_prompt=subtask_prompt,
+                    current_policy_prompt=current_policy_prompt,
+                    prompt_history=prompt_history,
+                    subtask_start_cursor=subtask_start_cursor,
+                    executed_steps=executed_steps,
+                    max_steps=max_steps,
+                    subtask_index=subtask_index,
+                    total_subtasks=total_subtasks,
+                )
+                logging.info(
+                    "Replay manipulate cap debug exported: %s",
+                    export_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logging.error(
+                    "Replay manipulate cap debug export failed: %s",
+                    exc,
+                )
     elif environment.is_episode_complete():
-        logging.info("Replay manipulate subtask stopped because the replay dataset is exhausted.")
+        logging.info(
+            "Replay manipulate subtask stopped because the replay dataset is exhausted."
+        )
+
+    if aborted_by_user:
+        stop_reason = "user_abort"
+    elif executed_steps >= max_steps and not environment.is_episode_complete():
+        stop_reason = "step_cap"
+    elif environment.is_episode_complete():
+        stop_reason = "replay_exhausted"
+    else:
+        stop_reason = "incomplete"
 
     return {
         "executed_steps": executed_steps,
         "prompt_queries": prompt_queries,
+        "completed": False,
         "completed_by_replan": False,
+        "completed_by_progress": False,
         "last_policy_prompt": current_policy_prompt,
+        "stop_reason": stop_reason,
     }
 
 
@@ -290,8 +741,44 @@ def _log_hybrid_replay_summary(
         _log_replay_summary(environment, policy_steps)
 
 
+def _get_visualizer_step(environment) -> int:
+    if environment.num_steps <= 0:
+        return 0
+    return min(max(environment.get_cursor(), 0), environment.num_steps - 1)
+
+
+def _build_navigation_visualizer_updater(
+    environment, visualizer, *, playback_rate: float, enabled: bool
+):
+    frame_interval_sec = 0.0
+    if enabled and environment.fps > 0:
+        frame_interval_sec = 1.0 / (environment.fps * playback_rate)
+
+    next_refresh_at: float | None = None
+
+    def _on_nav_step(step_idx: int) -> bool:
+        nonlocal next_refresh_at
+        if frame_interval_sec > 0:
+            now = time.monotonic()
+            if next_refresh_at is None:
+                next_refresh_at = now
+            elif now < next_refresh_at:
+                time.sleep(next_refresh_at - now)
+                now = time.monotonic()
+            next_refresh_at = now + frame_interval_sec
+
+        extra_info = (
+            f"navigate timeline frame: {step_idx + 1}/{environment.num_steps}, "
+            f"playback: {playback_rate:.2f}x"
+        )
+        return visualizer.update(step_idx, extra_info=extra_info)
+
+    return _on_nav_step
+
+
 def _run_replay_inference(args: Args, prompt: str) -> None:
     from examples.piper_real import replay_env as _replay_env
+    from examples.piper_real import replay_visualizer as _replay_visualizer
 
     if args.num_episodes != 1:
         logging.error("--replay-dataset currently supports only --num-episodes=1.")
@@ -311,7 +798,10 @@ def _run_replay_inference(args: Args, prompt: str) -> None:
 
     agent = _create_policy_agent(args)
 
-    if args.max_episode_steps == DEFAULT_MAX_EPISODE_STEPS and environment.num_steps > args.max_episode_steps:
+    if (
+        args.max_episode_steps == DEFAULT_MAX_EPISODE_STEPS
+        and environment.num_steps > args.max_episode_steps
+    ):
         logging.warning(
             "Replay dataset has %d steps; default --max-episode-steps=%d will truncate it. "
             "Pass --max-episode-steps 0 to run the full dataset.",
@@ -319,23 +809,38 @@ def _run_replay_inference(args: Args, prompt: str) -> None:
             args.max_episode_steps,
         )
 
+    visualizer = _replay_visualizer.ReplayVisualizer(
+        environment,
+        enabled=args.visualize,
+        port=args.visualize_port,
+        save_path=args.save_path,
+    )
+    visualizer.set_subtask_context(1, 1, "policy", prompt)
+
     environment.reset()
     agent.reset()
 
     executed_steps = 0
-    while not environment.is_episode_complete():
-        observation = environment.get_observation()
-        action = agent.get_action(observation)
-        environment.apply_action(action)
-        executed_steps += 1
+    try:
+        while not environment.is_episode_complete():
+            observation = environment.get_observation()
+            action = agent.get_action(observation)
+            environment.apply_action(action)
+            executed_steps += 1
 
-        if args.max_episode_steps > 0 and executed_steps >= args.max_episode_steps:
-            logging.info(
-                "Replay stopped early at %d steps due to --max-episode-steps=%d.",
-                executed_steps,
-                args.max_episode_steps,
-            )
-            break
+            if not visualizer.update(executed_steps - 1):
+                logging.info("Replay aborted by user at step %d.", executed_steps)
+                break
+
+            if args.max_episode_steps > 0 and executed_steps >= args.max_episode_steps:
+                logging.info(
+                    "Replay stopped early at %d steps due to --max-episode-steps=%d.",
+                    executed_steps,
+                    args.max_episode_steps,
+                )
+                break
+    finally:
+        visualizer.close()
 
     _log_replay_summary(environment, executed_steps)
 
@@ -343,17 +848,26 @@ def _run_replay_inference(args: Args, prompt: str) -> None:
 def _run_replay_planner(args: Args, prompt: str) -> None:
     from examples.piper_real import replay_env as _replay_env
     from examples.piper_real import replay_planner as _replay_planner
+    from examples.piper_real import replay_visualizer as _replay_visualizer
 
     if args.num_episodes != 1:
-        logging.error("--replay-dataset with --use-llm-planner currently supports only --num-episodes=1.")
+        logging.error(
+            "--replay-dataset with --use-llm-planner currently supports only --num-episodes=1."
+        )
         return
 
     if not prompt:
-        logging.error("--use-llm-planner with --replay-dataset requires a non-empty --prompt.")
+        logging.error(
+            "--use-llm-planner with --replay-dataset requires a non-empty --prompt."
+        )
         return
 
     if args.save_log:
         logging.info("--save-log is ignored in replay planner mode.")
+
+    if args.visualize_playback_rate <= 0:
+        logging.error("--visualize-playback-rate must be positive.")
+        return
 
     args.planner.validate_service_config()
     args.planner.validate_motion_limits()
@@ -377,19 +891,50 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
         environment.close()
         return
 
-    planner = _replay_planner.OfflineReplayNavigationPlanner(environment, args.planner)
+    visualizer = _replay_visualizer.ReplayVisualizer(
+        environment,
+        enabled=args.visualize,
+        port=args.visualize_port,
+        save_path=args.save_path,
+    )
+    on_nav_step = _build_navigation_visualizer_updater(
+        environment,
+        visualizer,
+        playback_rate=args.visualize_playback_rate,
+        enabled=args.visualize,
+    )
+
+    planner = _replay_planner.OfflineReplayNavigationPlanner(
+        environment,
+        args.planner,
+        on_step_callback=on_nav_step,
+    )
     try:
         for idx, subtask in enumerate(subtask_list):
             logging.info(
                 "Executing replay subtask %d/%d [%s]: %s",
-                idx + 1, len(subtask_list), subtask.type, subtask.prompt,
+                idx + 1,
+                len(subtask_list),
+                subtask.type,
+                subtask.prompt,
             )
 
             if subtask.type == "navigate":
+                visualizer.set_subtask_context(
+                    idx + 1, len(subtask_list), subtask.type, subtask.prompt
+                )
+                if not on_nav_step(_get_visualizer_step(environment)):
+                    logging.info(
+                        "Replay planner aborted by user before subtask %d/%d.",
+                        idx + 1,
+                        len(subtask_list),
+                    )
+                    return
                 if not planner.run(task_prompt=subtask.prompt):
                     logging.error(
                         "Replay navigation failed at subtask %d/%d; aborting.",
-                        idx + 1, len(subtask_list),
+                        idx + 1,
+                        len(subtask_list),
                     )
                     return
                 logging.info(
@@ -402,7 +947,9 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
             elif args.navigation_only:
                 logging.info("Manipulate (skipped): %s", subtask.prompt)
             else:
-                logging.info("Manipulate (skipped in replay planner mode): %s", subtask.prompt)
+                logging.info(
+                    "Manipulate (skipped in replay planner mode): %s", subtask.prompt
+                )
 
         logging.info(
             "Replay planner completed successfully at replay step %d/%d using camera %s.",
@@ -411,36 +958,54 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
             environment.front_camera_name,
         )
     finally:
+        visualizer.close()
         environment.close()
 
 
 def _run_replay_hybrid(args: Args, prompt: str) -> None:
     from examples.piper_real import replay_env as _replay_env
-    from examples.piper_real import replay_manipulation_planner as _replay_manipulation_planner
-    from examples.piper_real import replay_planner as _replay_planner
+    from examples.piper_real import (
+        replay_manipulation_planner as _replay_manipulation_planner,
+    )
+    from examples.piper_real import replay_navigation_executor as _replay_navigation_executor
+    from examples.piper_real import replay_visualizer as _replay_visualizer
 
     if args.num_episodes != 1:
-        logging.error("--replay-dataset with --replay-mode=hybrid currently supports only --num-episodes=1.")
+        logging.error(
+            "--replay-dataset with --replay-mode=hybrid currently supports only --num-episodes=1."
+        )
         return
 
     if not prompt:
-        logging.error("--replay-mode=hybrid with --replay-dataset requires a non-empty --prompt.")
+        logging.error(
+            "--replay-mode=hybrid with --replay-dataset requires a non-empty --prompt."
+        )
         return
 
     if args.replay_manipulate_max_steps <= 0:
-        logging.error("--replay-manipulate-max-steps must be positive in hybrid replay mode.")
+        logging.error(
+            "--replay-manipulate-max-steps must be positive in hybrid replay mode."
+        )
         return
 
     if args.replay_manipulate_replan_interval_steps <= 0:
-        logging.error("--replay-manipulate-replan-interval-steps must be positive in hybrid replay mode.")
+        logging.error(
+            "--replay-manipulate-replan-interval-steps must be positive in hybrid replay mode."
+        )
         return
 
     if args.save_log:
         logging.info("--save-log is ignored in replay hybrid mode.")
 
+    if args.visualize_playback_rate <= 0:
+        logging.error("--visualize-playback-rate must be positive.")
+        return
+
     args.planner.validate_service_config()
     args.planner.validate_motion_limits()
-    if not _run_required_server_checks(args, needs_pi0=not args.navigation_only, needs_planner=True):
+    if not _run_required_server_checks(
+        args, needs_pi0=not args.navigation_only, needs_planner=True
+    ):
         return
 
     logging.info("Replay hybrid mode: loading %s", args.replay_dataset)
@@ -450,22 +1015,84 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
         max_steps=args.max_episode_steps if args.max_episode_steps > 0 else None,
     )
 
-    subtask_list = _build_replay_subtask_list(args, prompt)
+    ordered_task_memory_runtime = _build_replay_ordered_task_memory_runtime(
+        args,
+        environment,
+    )
+    subtask_list = _build_replay_subtask_list(
+        args,
+        prompt,
+        ordered_task_memory_runtime=ordered_task_memory_runtime,
+    )
     if subtask_list is None:
+        logging.error(
+            "Replay hybrid exiting before execution at replay step %d/%d: subtask decomposition failed.",
+            environment.get_cursor(),
+            environment.num_steps,
+        )
         environment.close()
         return
 
-    planner = _replay_planner.OfflineReplayNavigationPlanner(environment, args.planner)
+    visualizer = _replay_visualizer.ReplayVisualizer(
+        environment,
+        enabled=args.visualize,
+        port=args.visualize_port,
+        save_path=args.save_path,
+    )
+    on_nav_step = _build_navigation_visualizer_updater(
+        environment,
+        visualizer,
+        playback_rate=args.visualize_playback_rate,
+        enabled=args.visualize,
+    )
+
+    navigation_executor = _replay_navigation_executor.ReplayNavigationExecutor(
+        environment,
+        on_step_callback=on_nav_step,
+    )
     policy_agent = None if args.navigation_only else _create_policy_agent(args)
     manipulation_planner = (
         None
         if args.navigation_only
-        else _replay_manipulation_planner.ReplayManipulationPromptPlanner(environment, args.planner)
+        else (
+            _replay_manipulation_planner.ReplayManipulationPromptPlanner(
+                environment,
+                args.planner,
+                task_memory_runtime=ordered_task_memory_runtime,
+            )
+            if ordered_task_memory_runtime is not None
+            else _replay_manipulation_planner.ReplayManipulationPromptPlanner(
+                environment,
+                args.planner,
+            )
+        )
     )
     completed_navigate = 0
     completed_manipulate = 0
     policy_steps = 0
     prompt_queries = 0
+    debug_export_dir = _resolve_replay_debug_export_dir(args)
+
+    def _log_hybrid_early_exit(
+        reason: str, *, subtask_index: int | None = None
+    ) -> None:
+        if subtask_index is None:
+            logging.error(
+                "Replay hybrid exiting early at replay step %d/%d: %s",
+                environment.get_cursor(),
+                environment.num_steps,
+                reason,
+            )
+            return
+
+        logging.error(
+            "Replay hybrid exiting early at replay step %d/%d during subtask %d/%d: %s",
+            environment.get_cursor(),
+            environment.num_steps,
+            subtask_index + 1,
+            len(subtask_list),
+            reason,
+        )
 
     try:
         for idx, subtask in enumerate(subtask_list):
@@ -476,20 +1103,41 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                 subtask.type,
                 subtask.prompt,
             )
+            visualizer.set_subtask_context(
+                idx + 1, len(subtask_list), subtask.type, subtask.prompt
+            )
 
             if subtask.type == "navigate":
-                if not planner.run(task_prompt=subtask.prompt):
-                    logging.error(
-                        "Replay navigation failed at subtask %d/%d; aborting.",
+                if not on_nav_step(_get_visualizer_step(environment)):
+                    _log_hybrid_early_exit(
+                        "user aborted before navigation execution",
+                        subtask_index=idx,
+                    )
+                    logging.info(
+                        "Replay hybrid aborted by user before subtask %d/%d.",
                         idx + 1,
                         len(subtask_list),
                     )
                     return
+                result = navigation_executor.navigate(subtask.prompt)
+                if not result.ok:
+                    _log_hybrid_early_exit(
+                        result.error or "navigation tool returned failure",
+                        subtask_index=idx,
+                    )
+                    logging.error(
+                        "Replay navigation failed at subtask %d/%d: %s",
+                        idx + 1,
+                        len(subtask_list),
+                        result.error or "unknown error",
+                    )
+                    return
                 completed_navigate += 1
                 logging.info(
-                    "Replay navigate subtask %d/%d succeeded at replay step %d/%d.",
+                    "Replay navigate subtask %d/%d succeeded via routine %s at replay step %d/%d.",
                     idx + 1,
                     len(subtask_list),
+                    result.routine_name,
                     environment.get_cursor(),
                     environment.num_steps,
                 )
@@ -499,8 +1147,12 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                 logging.info("Manipulate (skipped): %s", subtask.prompt)
                 continue
 
-            assert policy_agent is not None, "hybrid manipulate subtask requires a policy agent"
-            assert manipulation_planner is not None, "hybrid manipulate subtask requires a prompt replanner"
+            assert (
+                policy_agent is not None
+            ), "hybrid manipulate subtask requires a policy agent"
+            assert (
+                manipulation_planner is not None
+            ), "hybrid manipulate subtask requires a prompt replanner"
             manipulation_result = _run_replay_manipulation_subtask(
                 environment,
                 policy_agent,
@@ -508,22 +1160,63 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                 subtask_prompt=subtask.prompt,
                 max_steps=args.replay_manipulate_max_steps,
                 replan_interval_steps=args.replay_manipulate_replan_interval_steps,
+                progress_complete_threshold=args.planner.progress_complete_threshold,
+                progress_stall_threshold=args.planner.progress_stall_threshold,
+                progress_stall_steps=args.planner.progress_stall_steps,
+                progress_regression_threshold=args.planner.progress_regression_threshold,
+                progress_confirm_with_replanner=args.planner.progress_confirm_with_replanner,
+                debug_export_dir=debug_export_dir,
+                subtask_index=idx + 1,
+                total_subtasks=len(subtask_list),
+                visualizer=visualizer,
             )
             executed_steps = int(manipulation_result["executed_steps"])
-            completed_manipulate += 1
             policy_steps += executed_steps
             prompt_queries += int(manipulation_result["prompt_queries"])
-            logging.info(
-                "Replay manipulate subtask %d/%d completed after %d policy steps, "
-                "%d prompt queries, at replay cursor %d/%d.",
-                idx + 1,
-                len(subtask_list),
-                executed_steps,
-                int(manipulation_result["prompt_queries"]),
-                environment.get_cursor(),
-                environment.num_steps,
-            )
+            if bool(manipulation_result.get("completed", False)):
+                completed_manipulate += 1
+                logging.info(
+                    "Replay manipulate subtask %d/%d completed after %d policy steps, "
+                    "%d prompt queries, at replay cursor %d/%d.",
+                    idx + 1,
+                    len(subtask_list),
+                    executed_steps,
+                    int(manipulation_result["prompt_queries"]),
+                    environment.get_cursor(),
+                    environment.num_steps,
+                )
+            else:
+                stop_reason = str(manipulation_result.get("stop_reason", "incomplete"))
+                if stop_reason == "replay_exhausted" and idx + 1 == len(subtask_list):
+                    logging.warning(
+                        "Replay dataset exhausted during final manipulate subtask %d/%d "
+                        "after %d policy steps with no explicit completion signal.",
+                        idx + 1,
+                        len(subtask_list),
+                        executed_steps,
+                    )
+                    break
+                _log_hybrid_early_exit(
+                    f"manipulate subtask did not complete ({stop_reason})",
+                    subtask_index=idx,
+                )
+                logging.error(
+                    "Replay manipulate subtask %d/%d did not complete after %d policy steps, "
+                    "%d prompt queries, at replay cursor %d/%d; stop_reason=%s",
+                    idx + 1,
+                    len(subtask_list),
+                    executed_steps,
+                    int(manipulation_result["prompt_queries"]),
+                    environment.get_cursor(),
+                    environment.num_steps,
+                    stop_reason,
+                )
+                return
             if environment.is_episode_complete() and idx + 1 < len(subtask_list):
+                _log_hybrid_early_exit(
+                    "replay dataset exhausted with remaining subtasks",
+                    subtask_index=idx,
+                )
                 logging.error(
                     "Replay dataset exhausted after subtask %d/%d; aborting remaining subtasks.",
                     idx + 1,
@@ -540,6 +1233,7 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
             prompt_queries=prompt_queries,
         )
     finally:
+        visualizer.close()
         environment.close()
 
 
@@ -554,7 +1248,9 @@ def main(args: Args) -> None:
             return
 
         if args.use_robot_base:
-            logging.error("--use-robot-base and --replay-dataset are mutually exclusive.")
+            logging.error(
+                "--use-robot-base and --replay-dataset are mutually exclusive."
+            )
             return
 
         if replay_mode == "planner":
@@ -594,12 +1290,16 @@ def main(args: Args) -> None:
     if not args.use_llm_planner or not prompt:
         if args.use_llm_planner:
             args.planner.validate_service_config()
-            logging.info("LLM planner enabled but prompt is empty; running stationary manipulation.")
+            logging.info(
+                "LLM planner enabled but prompt is empty; running stationary manipulation."
+            )
 
         if not _run_required_server_checks(args, needs_pi0=True):
             return
 
-        ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(host=args.host, port=args.port)
+        ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
+            host=args.host, port=args.port
+        )
         metadata = ws_client_policy.get_server_metadata()
         logging.info("Server metadata: %s", metadata)
 
@@ -688,7 +1388,10 @@ def main(args: Args) -> None:
         for idx, subtask in enumerate(subtask_list):
             logging.info(
                 "Executing subtask %d/%d [%s]: %s",
-                idx + 1, len(subtask_list), subtask.type, subtask.prompt,
+                idx + 1,
+                len(subtask_list),
+                subtask.type,
+                subtask.prompt,
             )
 
             if subtask.type == "navigate":
@@ -701,12 +1404,16 @@ def main(args: Args) -> None:
                 if not result.ok:
                     logging.error(
                         "Navigation failed at subtask %d/%d: %s",
-                        idx + 1, len(subtask_list), result.error or "unknown error",
+                        idx + 1,
+                        len(subtask_list),
+                        result.error or "unknown error",
                     )
                     return
                 logging.info(
                     "Navigate subtask %d/%d succeeded via routine %s.",
-                    idx + 1, len(subtask_list), result.routine_name,
+                    idx + 1,
+                    len(subtask_list),
+                    result.routine_name,
                 )
 
             elif subtask.type == "manipulate":
@@ -714,8 +1421,11 @@ def main(args: Args) -> None:
                     logging.info("Manipulate (skipped): %s", subtask.prompt)
                     continue
 
-                assert ws_client_policy is not None, "manipulate subtask requires server connection"
+                assert (
+                    ws_client_policy is not None
+                ), "manipulate subtask requires server connection"
                 environment.set_prompt(subtask.prompt)
+                # TODO: integrate progress-first logic (see replay/hybrid path)
                 runtime = _runtime.Runtime(
                     environment=environment,
                     agent=_policy_agent.PolicyAgent(
@@ -730,7 +1440,9 @@ def main(args: Args) -> None:
                     max_episode_steps=args.max_episode_steps,
                 )
                 runtime.run()
-                logging.info("Manipulate subtask %d/%d completed.", idx + 1, len(subtask_list))
+                logging.info(
+                    "Manipulate subtask %d/%d completed.", idx + 1, len(subtask_list)
+                )
 
         logging.info("All subtasks completed successfully.")
     finally:

@@ -5,10 +5,10 @@ from __future__ import annotations
 import base64
 import dataclasses
 import json
+import logging
 from typing import Any
 
 import cv2
-from openai import OpenAI
 
 from examples.piper_real.llm_utils import extract_message_json_text
 from examples.piper_real.planner_config import PlannerConfig
@@ -29,9 +29,17 @@ class ManipulationReplanDecision:
 class ReplayManipulationPromptPlanner:
     """Use replay frames to periodically refine the manipulation prompt for pi0."""
 
-    def __init__(self, replay_environment: ReplayEnvironment, config: PlannerConfig) -> None:
+    def __init__(
+        self,
+        replay_environment: ReplayEnvironment,
+        config: PlannerConfig,
+        task_memory_runtime=None,
+    ) -> None:
+        from openai import OpenAI
+
         self.replay_environment = replay_environment
         self.config = config
+        self.task_memory_runtime = task_memory_runtime
         self.client = OpenAI(base_url=config.base_url, api_key=config.api_key)
 
     def plan(
@@ -59,6 +67,28 @@ class ReplayManipulationPromptPlanner:
                 ),
             }
         ]
+        if self.task_memory_runtime is not None:
+            try:
+                ordered_task_context = self.task_memory_runtime.build_context()
+            except Exception as exc:  # noqa: BLE001
+                logging.warning(
+                    "Replay manipulation planner could not refresh ordered task memory: %s",
+                    exc,
+                )
+            else:
+                message_content.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            "Ordered task context:\n"
+                            f"{ordered_task_context['ordered_task_spec_text']}\n\n"
+                            "Working memory:\n"
+                            f"{ordered_task_context['working_memory_text']}\n\n"
+                            "Current stage estimate:\n"
+                            f"{ordered_task_context['stage_estimate_text']}"
+                        ),
+                    }
+                )
         for cam_name in self.replay_environment.camera_names:
             message_content.append(
                 {
@@ -76,7 +106,8 @@ class ReplayManipulationPromptPlanner:
         response = self.client.chat.completions.create(
             model=self.config.model,
             temperature=0,
-            response_format={"type": "json_object"},
+            #response_format={"type": "json_object"},
+            max_tokens=self.config.manipulation_replanner_max_tokens,
             messages=[
                 {
                     "role": "system",
@@ -91,7 +122,9 @@ class ReplayManipulationPromptPlanner:
                         "single-stage policy prompt. "
                         "Use 'complete' only when the current manipulation objective is already finished "
                         "and control should return to the outer long-horizon planner. "
-                        "Do not ask the policy to navigate."
+                        "Do not ask the policy to navigate. "
+                        "If ordered task context is provided, stay consistent with that task order "
+                        "and the rolling memory."
                     ),
                 },
                 {
@@ -99,6 +132,11 @@ class ReplayManipulationPromptPlanner:
                     "content": message_content,
                 },
             ],
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": self.config.manipulation_replanner_enable_thinking,
+                }
+            },
         )
         try:
             raw_text, raw_json = extract_message_json_text(response.choices[0].message)

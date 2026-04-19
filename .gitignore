@@ -128,3 +128,4 @@ dmypy.json
 # Local deployment config
 config/servers.toml
 !config/servers.example.toml
+/outputs

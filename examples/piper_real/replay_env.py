@@ -172,6 +172,16 @@ class ReplayEnvironment(_environment.Environment):
             raise IndexError(f"Replay step {idx} is out of range for {self._num_steps} steps")
         return self._load_image(cam_name, idx).copy()
 
+    def get_state(self, idx: int) -> np.ndarray:
+        if idx < 0 or idx >= self._num_steps:
+            raise IndexError(f"Replay step {idx} is out of range for state")
+        return self._qpos[idx].copy()
+
+    def get_ground_truth_action(self, idx: int) -> np.ndarray:
+        if idx < 0 or idx >= len(self.ground_truth_actions):
+            raise IndexError(f"Replay step {idx} is out of range for actions")
+        return np.asarray(self.ground_truth_actions[idx]).copy()
+
     def get_front_image(self, idx: int) -> np.ndarray:
         return self.get_image(self._front_camera_name, idx)
 
@@ -237,12 +247,17 @@ class ReplayEnvironment(_environment.Environment):
             self.predicted_action_steps.append(step_idx)
             self._last_observation_idx = None
             logging.info(
-                "Replay step %d — predicted action: %s",
+                "Replay step %d — predicted action: %s%s",
                 step_idx,
                 np.array2string(
                     np.asarray(action["actions"]),
                     precision=4,
                     suppress_small=True,
                     max_line_width=200,
+                ),
+                (
+                    ""
+                    if "progress" not in action
+                    else f", progress={float(np.asarray(action['progress'])):.4f}"
                 ),
             )

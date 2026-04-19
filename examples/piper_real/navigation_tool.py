@@ -2,6 +2,7 @@ import dataclasses
 import logging
 import time
 from typing import Any
+from typing import Callable
 
 from examples.piper_real import base_safety
 
@@ -25,6 +26,66 @@ class NavigationResult:
     routine_name: str
     executed_steps: int
     error: str | None = None
+
+
+def _run_navigation_routine(
+    prompt: str,
+    *,
+    routine_name: str,
+    routine: tuple[tuple[float, float, float], ...],
+    execute_step: Callable[[tuple[float, float, float]], None],
+    stop_base_fn: Callable[[], None],
+    dry_run: bool = False,
+    inter_step_sleep_s: float = INTER_STEP_SLEEP_S,
+) -> NavigationResult:
+    logging.info(
+        "Navigation tool invoked: prompt=%s routine=%s dry_run=%s",
+        prompt,
+        routine_name,
+        dry_run,
+    )
+
+    if dry_run:
+        return NavigationResult(
+            ok=True,
+            prompt=prompt,
+            routine_name=routine_name,
+            executed_steps=0,
+        )
+
+    executed_steps = 0
+    try:
+        for idx, step in enumerate(routine, start=1):
+            logging.info(
+                "Navigation step %d/%d: linear_x=%s angular_z=%s duration=%s",
+                idx,
+                len(routine),
+                step[0],
+                step[1],
+                step[2],
+            )
+            execute_step(step)
+            executed_steps = idx
+            if inter_step_sleep_s > 0 and idx < len(routine):
+                time.sleep(inter_step_sleep_s)
+    except Exception as exc:  # noqa: BLE001
+        stop_base_fn()
+        logging.error("Navigation tool failed after %d steps: %s", executed_steps, exc)
+        return NavigationResult(
+            ok=False,
+            prompt=prompt,
+            routine_name=routine_name,
+            executed_steps=executed_steps,
+            error=str(exc),
+        )
+
+    stop_base_fn()
+    return NavigationResult(
+        ok=True,
+        prompt=prompt,
+        routine_name=routine_name,
+        executed_steps=executed_steps,
+    )
 
 
 def _execute_step(
@@ -56,60 +117,28 @@ def navigate(
     *,
     dry_run: bool = False,
 ) -> NavigationResult:
-    logging.info(
-        "Navigation tool invoked: prompt=%s routine=%s dry_run=%s",
-        prompt,
-        DEFAULT_ROUTINE_NAME,
-        dry_run,
-    )
-
-    if dry_run:
-        return NavigationResult(
-            ok=True,
-            prompt=prompt,
-            routine_name=DEFAULT_ROUTINE_NAME,
-            executed_steps=0,
-        )
-
     if ros_operator is None:
-        return NavigationResult(
-            ok=False,
-            prompt=prompt,
-            routine_name=DEFAULT_ROUTINE_NAME,
-            executed_steps=0,
-            error="ros_operator is required when dry_run is False",
-        )
-
-    executed_steps = 0
-    try:
-        for idx, step in enumerate(DEFAULT_DEMO_ROUTINE, start=1):
-            logging.info(
-                "Navigation step %d/%d: linear_x=%s angular_z=%s duration=%s",
-                idx,
-                len(DEFAULT_DEMO_ROUTINE),
-                step[0],
-                step[1],
-                step[2],
+        if not dry_run:
+            return NavigationResult(
+                ok=False,
+                prompt=prompt,
+                routine_name=DEFAULT_ROUTINE_NAME,
+                executed_steps=0,
+                error="ros_operator is required when dry_run is False",
             )
-            _execute_step(ros_operator, step)
-            executed_steps = idx
-            if idx < len(DEFAULT_DEMO_ROUTINE):
-                time.sleep(INTER_STEP_SLEEP_S)
-    except Exception as exc:  # noqa: BLE001
-        base_safety.stop_base(ros_operator)
-        logging.error("Navigation tool failed after %d steps: %s", executed_steps, exc)
-        return NavigationResult(
-            ok=False,
-            prompt=prompt,
-            routine_name=DEFAULT_ROUTINE_NAME,
-            executed_steps=executed_steps,
-            error=str(exc),
-        )
 
-    base_safety.stop_base(ros_operator)
-    return NavigationResult(
-        ok=True,
-        prompt=prompt,
+        stop_base_fn = lambda: None
+        execute_step = lambda _step: None
+    else:
+        stop_base_fn = lambda: base_safety.stop_base(ros_operator)
+        execute_step = lambda step: _execute_step(ros_operator, step)
+
+    return _run_navigation_routine(
+        prompt,
         routine_name=DEFAULT_ROUTINE_NAME,
-        executed_steps=executed_steps,
+        routine=DEFAULT_DEMO_ROUTINE,
+        execute_step=execute_step,
+        stop_base_fn=stop_base_fn,
+        dry_run=dry_run,
+        inter_step_sleep_s=INTER_STEP_SLEEP_S,
     )
