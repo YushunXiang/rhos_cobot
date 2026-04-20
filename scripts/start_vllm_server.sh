@@ -22,7 +22,7 @@ ssh "$SSH_TARGET" "tmux kill-session -t $SESSION_NAME 2>/dev/null || true"
 
 echo "Starting vLLM planner server at http://$REMOTE_HOST:$VLLM_PORT/v1 via SSH target '$SSH_TARGET'..."
 ssh "$SSH_TARGET" "tmux new-session -d -s $SESSION_NAME \
-  'bash -l -c \"cd $WORK_DIR && uv run vllm serve $MODEL_PATH --served-model-name $SERVED_MODEL_NAME\"; exec bash'"
+  'bash -l -c \"cd $WORK_DIR && uv run vllm serve $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --port $VLLM_PORT\"; exec bash'"
 
 echo "Server starting in tmux session '$SESSION_NAME' for planner host '$REMOTE_HOST' via SSH target '$SSH_TARGET'."
 echo "Expected planner base URL: http://$REMOTE_HOST:$VLLM_PORT/v1"

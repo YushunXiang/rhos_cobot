@@ -22,7 +22,7 @@ sleep 4  # 暂停 4 秒，等待 CAN 通讯建立
 echo ">>> [4/4] 启动 tracer_demo.py 控制脚本..."
 gnome-terminal --title="tracer_demo" -- bash -c "
 source /home/agilex/rhos_cobot-001-llm-navigation-stage/examples/piper_real/.venv/bin/activate && 
-cd /home/agilex/rhos_cobot-001-llm-navigation-stage/examples/piper_real/scripts/tracer && 
+cd /home/agilex/rhos_cobot-001-llm-navigation-stage/scripts/tracer && 
 python tracer_demo.py; 
 exec bash"
 

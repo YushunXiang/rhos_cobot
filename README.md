@@ -75,7 +75,10 @@ source examples/piper_real/.venv/bin/activate
 python -m examples.piper_real.main
 ```
 
-详见 [docs/deploy.md](docs/deploy.md)
+详见：
+
+- 纯手臂部署（最小运行）：[docs/deploy.md](docs/deploy.md)
+- VLM + VLA 双系统推理（含任务拆解、底盘导航、离线 replay）：[docs/dual_system_deploy.md](docs/dual_system_deploy.md)
 
 ## TODO
 - [x] 数据检查代码 merge 进来
