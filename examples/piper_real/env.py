@@ -40,6 +40,11 @@ class PiperRealEnvironment(_environment.Environment):
     def set_prompt(self, prompt: str) -> None:
         self._prompt = prompt
 
+    def close(self) -> None:
+        close = getattr(self._env, "close", None)
+        if callable(close):
+            close()
+
     @override
     def reset(self) -> None:
         self._ts = self._env.reset()

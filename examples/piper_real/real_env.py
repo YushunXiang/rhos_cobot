@@ -86,9 +86,11 @@ class PiperRealEnv:
         reset_pos: Optional[List[float]] = None,
         setup_robots: bool = False,
     ):
+        self.spin_thread = None
         if init_node:
             rospy.init_node('joint_state_publisher_pi0_debug', anonymous=True)
             self.spin_thread = Thread(target=self.spin)
+            self.spin_thread.daemon = True
             self.spin_thread.start()
         self._reset_pos = reset_pos
         self.ros_operator = _ros_oper.RosOperator(ros_config)
@@ -108,6 +110,12 @@ class PiperRealEnv:
 
     def setup_robots(self):
         pass
+
+    def close(self):
+        if not rospy.is_shutdown():
+            rospy.signal_shutdown("PiperRealEnv closed")
+        if self.spin_thread is not None and self.spin_thread.is_alive():
+            self.spin_thread.join(timeout=2.0)
 
     def reset(self,*, fake=False):
         if not fake:

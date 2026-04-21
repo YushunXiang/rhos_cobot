@@ -967,7 +967,6 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
     from examples.piper_real import (
         replay_manipulation_planner as _replay_manipulation_planner,
     )
-    from examples.piper_real import replay_navigation_executor as _replay_navigation_executor
     from examples.piper_real import replay_visualizer as _replay_visualizer
 
     if args.num_episodes != 1:
@@ -1046,10 +1045,6 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
         enabled=args.visualize,
     )
 
-    navigation_executor = _replay_navigation_executor.ReplayNavigationExecutor(
-        environment,
-        on_step_callback=on_nav_step,
-    )
     policy_agent = None if args.navigation_only else _create_policy_agent(args)
     manipulation_planner = (
         None
@@ -1119,27 +1114,12 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                         len(subtask_list),
                     )
                     return
-                result = navigation_executor.navigate(subtask.prompt)
-                if not result.ok:
-                    _log_hybrid_early_exit(
-                        result.error or "navigation tool returned failure",
-                        subtask_index=idx,
-                    )
-                    logging.error(
-                        "Replay navigation failed at subtask %d/%d: %s",
-                        idx + 1,
-                        len(subtask_list),
-                        result.error or "unknown error",
-                    )
-                    return
                 completed_navigate += 1
                 logging.info(
-                    "Replay navigate subtask %d/%d succeeded via routine %s at replay step %d/%d.",
+                    "Skipping navigate subtask %d/%d in replay mode: %s",
                     idx + 1,
                     len(subtask_list),
-                    result.routine_name,
-                    environment.get_cursor(),
-                    environment.num_steps,
+                    subtask.prompt,
                 )
                 continue
 
@@ -1384,6 +1364,7 @@ def main(args: Args) -> None:
         )
 
     # Step 6: Execute subtask loop
+    navigation_only_ran = False
     try:
         for idx, subtask in enumerate(subtask_list):
             logging.info(
@@ -1395,6 +1376,15 @@ def main(args: Args) -> None:
             )
 
             if subtask.type == "navigate":
+                if args.navigation_only and navigation_only_ran:
+                    logging.info(
+                        "Skipping additional navigate subtask %d/%d in navigation-only mode: %s",
+                        idx + 1,
+                        len(subtask_list),
+                        subtask.prompt,
+                    )
+                    continue
+
                 ros_operator = None if environment is None else environment.ros_operator
                 result = _navigation_tool.navigate(
                     subtask.prompt,
@@ -1409,6 +1399,7 @@ def main(args: Args) -> None:
                         result.error or "unknown error",
                     )
                     return
+                navigation_only_ran = True
                 logging.info(
                     "Navigate subtask %d/%d succeeded via routine %s.",
                     idx + 1,
@@ -1446,8 +1437,12 @@ def main(args: Args) -> None:
 
         logging.info("All subtasks completed successfully.")
     finally:
-        if args.use_robot_base and environment is not None:
-            _base_safety.stop_base(environment.ros_operator)
+        if environment is not None:
+            if args.use_robot_base:
+                _base_safety.stop_base(environment.ros_operator)
+            close = getattr(environment, "close", None)
+            if callable(close):
+                close()
 
 
 if __name__ == "__main__":

@@ -16,6 +16,9 @@ def _install_live_main_fakes(monkeypatch, recorded, *, planner_run_routine_resul
         def set_prompt(self, prompt):
             recorded.setdefault("manipulate_prompts", []).append(prompt)
 
+        def close(self):
+            recorded["environment_close_calls"] = recorded.get("environment_close_calls", 0) + 1
+
     class FakeLLMNavigationPlanner:
         def __init__(self, ros_operator, _config):
             recorded.setdefault("planner_inits", []).append(ros_operator)
@@ -127,6 +130,7 @@ def test_main_calls_navigation_tool_before_manipulation(monkeypatch):
     assert recorded["manipulate_prompts"] == ["pick cup"]
     assert recorded["runtime_runs"] == 1
     assert recorded["stop_calls"] == 1
+    assert recorded["environment_close_calls"] == 1
 
 
 def test_main_aborts_manipulation_when_navigation_tool_fails(monkeypatch):
@@ -209,6 +213,7 @@ def test_main_aborts_manipulation_when_navigation_tool_fails(monkeypatch):
 
     assert recorded["runtime_runs"] == 0
     assert recorded["stop_calls"] == 1
+    assert recorded["environment_close_calls"] == 1
     assert "manipulate_prompts" not in recorded
 
 
@@ -255,3 +260,49 @@ def test_main_navigation_only_uses_dry_run_without_runtime(monkeypatch):
     main_module.main(args)
 
     assert recorded["navigate_call"] == ("move to table", None, True)
+
+
+def test_main_navigation_only_runs_navigation_once(monkeypatch):
+    from examples.piper_real import main as main_module
+    from examples.piper_real import navigation_tool as navigation_tool_mod
+    from examples.piper_real import task_decomposer as task_decomposer_mod
+
+    recorded: dict[str, object] = {"navigate_calls": []}
+
+    _install_live_main_fakes(monkeypatch, recorded, planner_run_routine_result=True)
+
+    class FakeTaskDecomposer:
+        def __init__(self, _config):
+            pass
+
+        def decompose(self, _prompt):
+            return [
+                task_decomposer_mod.Subtask(type="navigate", prompt="move to kitchen"),
+                task_decomposer_mod.Subtask(type="navigate", prompt="move to living room"),
+                task_decomposer_mod.Subtask(type="manipulate", prompt="pick cup"),
+            ]
+
+    def fake_navigate(prompt, ros_operator, *, dry_run=False):
+        recorded["navigate_calls"].append((prompt, ros_operator, dry_run))
+        return navigation_tool_mod.NavigationResult(
+            ok=True,
+            prompt=prompt,
+            routine_name="default_demo",
+            executed_steps=0,
+        )
+
+    monkeypatch.setattr(task_decomposer_mod, "TaskDecomposer", FakeTaskDecomposer)
+    monkeypatch.setattr(main_module, "_run_required_server_checks", lambda *args, **kwargs: True)
+    monkeypatch.setattr(navigation_tool_mod, "navigate", fake_navigate)
+
+    args = main_module.Args(
+        use_llm_planner=True,
+        navigation_only=True,
+        prompt="move to kitchen and living room",
+        skip_server_checks=True,
+    )
+    monkeypatch.setattr(args.planner, "validate_service_config", lambda: None)
+
+    main_module.main(args)
+
+    assert recorded["navigate_calls"] == [("move to kitchen", None, True)]

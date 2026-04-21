@@ -254,7 +254,7 @@ python -m examples.piper_real.main \
 
 1. **TaskDecomposer**: 一次性 LLM 调用，将 prompt 拆解为 subtask 列表。
 2. **navigation_tool + Runtime**:
-   - `navigate` subtask 调用 `examples/piper_real/navigation_tool.py`
+   - `navigate` subtask 调用 `examples/piper_real/navigation_tool.py`，基于 `/odom_raw` 反馈把底盘闭环驱动到一组固定 body-frame 坐标目标（语义与 `scripts/run_tracer_demo_sequence_3term.sh` 等价）。
    - `manipulate` subtask 继续走现有 OpenPI Runtime
 
 ### 执行流程
@@ -288,16 +288,31 @@ Planner 返回 JSON only，例如：
 }
 ```
 
+### Navigation tool 默认 routine
+
+`navigation_tool.navigate()` 默认执行以下 5 个 body-frame 目标（相对 `navigate()` 调用时刻的起始位姿），与 `scripts/run_tracer_demo_sequence_3term.sh` 完全对齐：
+
+| # | goal_x | goal_y | goal_yaw | 含义 |
+|---|---|---|---|---|
+| 1 | -0.3 | 0.0 | 0.0 | 后退 0.3 m |
+| 2 | -0.3 | 0.0 | π/2 | 原地左转 90° |
+| 3 | -0.3 | 0.6 | π/2 | 前进 0.6 m |
+| 4 | -0.3 | 0.6 | 0.0 | 原地右转 90° |
+| 5 | 0.0 | 0.6 | 0.0 | 前进 0.3 m |
+
+每个目标通过 `navigate_to_goal` 以 `/odom_raw` 反馈闭环驱动；相邻目标之间 `sleep(1s)` 并补零速。任一目标失败立刻终止整条序列、补零速。`--use-robot-base` 未设置时 navigate 只打印每个目标（dry-run），不订阅 odom、不发布 `/cmd_vel`。
+
 ### 安全机制
 
 - navigate subtask 开始前只做一次人工安全确认。
-- navigation tool 的每个固定步骤执行后都会补发零速度到底盘。
+- 每个坐标目标到达后、以及两目标之间都会补发零速度到底盘。
+- 若订阅不到 `/odom_raw`，navigation tool 会在 `odom_wait_timeout_s` 内 fail-fast，补零速并返回失败。
 - 导航失败时终止整个任务，手臂操作不会启动。
 - 运行退出时会再补发一次零速度到底盘。
 
 ## 6. 操作阶段底盘行为
 
-操作（manipulate）阶段策略输出固定为 14 维（仅手臂关节），不包含底盘控制。底盘移动只发生在 navigate subtask 中，并由 `examples/piper_real/navigation_tool.py` 执行。
+操作（manipulate）阶段策略输出固定为 14 维（仅手臂关节），不包含底盘控制。底盘移动只发生在 navigate subtask 中，并由 `examples/piper_real/navigation_tool.py` 通过 `/odom_raw` 闭环控制执行。
 
 如果策略模型输出超过 14 维，多余维度会被截断。
 
@@ -348,6 +363,8 @@ bash scripts/run_tracer_demo_sequence_3term.sh
 
 运行前需满足 §1 中 TRACER 的硬件预检（急停释放、遥控器切到指令控制模式、电压充足等）；该脚本不会触发 §0 中的 `yes` 安全确认，请操作员在执行前自行确认现场安全并保持视线可见。
 
+该 5 步序列与 `examples/piper_real/navigation_tool.navigate()` 的默认 routine 一致；部署路径下 `--use-llm-planner --use-robot-base` 的 navigate 子任务会复用同一控制律与 `/odom_raw` 反馈。
+
 ## 8. 离线回放调试（`--replay-dataset`）
 
 使用已有 HDF5 数据集做 mock 推理验证：`main.py` 会读取回放观测，连接 pi0 policy server 做真实推理，但不需要实机、ROS 或底盘 bring-up。
@@ -391,7 +408,7 @@ START_TARGET=all bash scripts/run_piper_replay_mock.sh local
 | `planner` | `--planner-replay` | `REPLAY_MODE=planner` | 离线 VLM planner replay，不走 pi0 |
 | `hybrid` | `--hybrid-replay` | `REPLAY_MODE=hybrid` | VLM 拆任务/重规划 + 本地 navigation tool + pi0 操作的混合 replay |
 
-`hybrid` 模式需要 planner + pi0 两个服务，脚本会自动把 `START_TARGET=pi0` 提升为 `all`。其中 planner 仅负责 task decomposition 和 manipulate prompt replan；`navigate` 子任务复用共享 navigation tool，不再逐步请求 VLM 底盘动作。相关环境变量：
+`hybrid` 模式需要 planner + pi0 两个服务，脚本会自动把 `START_TARGET=pi0` 提升为 `all`。其中 planner 仅负责 task decomposition 和 manipulate prompt replan；`navigate` 子任务在 replay 模式下直接跳过（只打印日志，不模拟底盘运动），因为离线数据集没有可用的 `/odom_raw` 反馈可驱动坐标闭环。相关环境变量：
 
 - `PLANNER_HOST` / `PLANNER_PORT` / `PLANNER_MODEL`：planner 服务地址、端口、模型名；未设置时从 `config/servers.toml` 取。
 - `MANIPULATE_MAX_STEPS`（默认 64）：hybrid 模式下每个 manipulate subtask 的策略步数上限。

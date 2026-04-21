@@ -6,7 +6,7 @@ The flow is now decomposition-first:
 
 1. Build `PiperRealEnvironment` and connect to the OpenPI policy server only when a manipulate subtask exists.
 2. If `--use-llm-planner` is enabled and `--prompt` is non-empty, send the full task prompt to the planner service and get back ordered `navigate` / `manipulate` subtasks.
-3. Execute each `navigate` subtask by calling `examples.piper_real.navigation_tool.navigate(...)`, which runs the fixed `default_demo` TRACER routine in v1.
+3. Execute each `navigate` subtask by calling `examples.piper_real.navigation_tool.navigate(...)`, which drives the base through a fixed sequence of body-frame coordinate goals using odometry feedback (same semantics as `scripts/run_tracer_demo_sequence_3term.sh`).
 4. Execute each `manipulate` subtask with the existing OpenPI Runtime path.
 
 ## Safety

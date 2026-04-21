@@ -341,72 +341,6 @@ class TestOfflineReplayNavigationPlanner:
         assert env.get_cursor() == 3
 
 
-class TestReplayNavigationExecutor:
-    def test_navigate_advances_by_duration_times_fps(self, tmp_path, monkeypatch):
-        hdf5_path = str(tmp_path / "episode_0.hdf5")
-        _create_test_hdf5(hdf5_path, num_steps=10, fps=2.0)
-
-        from examples.piper_real import navigation_tool
-        from examples.piper_real.replay_env import ReplayEnvironment
-        from examples.piper_real.replay_navigation_executor import ReplayNavigationExecutor
-
-        env = ReplayEnvironment(dataset_path=hdf5_path, prompt="test task")
-        callback_steps: list[int] = []
-        executor = ReplayNavigationExecutor(
-            env,
-            on_step_callback=lambda step_idx: callback_steps.append(step_idx) or True,
-        )
-        monkeypatch.setattr(
-            navigation_tool,
-            "DEFAULT_DEMO_ROUTINE",
-            (
-                (0.2, 0.0, 1.0),
-                (0.0, 0.1, 0.5),
-            ),
-        )
-
-        result = executor.navigate("move to table")
-
-        assert result.ok is True
-        assert result.executed_steps == 2
-        assert env.get_cursor() == 3
-        assert callback_steps == [1, 2, 3]
-        assert executor.published_commands == [
-            [0.2, 0.0],
-            [0.0, 0.0],
-            [0.0, 0.1],
-            [0.0, 0.0],
-            [0.0, 0.0],
-        ]
-
-    def test_navigate_fails_when_replay_exhausts_mid_routine(self, tmp_path, monkeypatch):
-        hdf5_path = str(tmp_path / "episode_0.hdf5")
-        _create_test_hdf5(hdf5_path, num_steps=2, fps=1.0)
-
-        from examples.piper_real import navigation_tool
-        from examples.piper_real.replay_env import ReplayEnvironment
-        from examples.piper_real.replay_navigation_executor import ReplayNavigationExecutor
-
-        env = ReplayEnvironment(dataset_path=hdf5_path, prompt="test task")
-        executor = ReplayNavigationExecutor(env)
-        monkeypatch.setattr(
-            navigation_tool,
-            "DEFAULT_DEMO_ROUTINE",
-            (
-                (0.2, 0.0, 1.0),
-                (0.1, 0.0, 1.0),
-            ),
-        )
-
-        result = executor.navigate("move until replay ends")
-
-        assert result.ok is False
-        assert result.executed_steps == 1
-        assert result.error == "replay dataset exhausted during navigation step"
-        assert env.get_cursor() == env.num_steps
-        assert executor.published_commands[-1] == [0.0, 0.0]
-
-
 class TestMainReplayIntegration:
     """Verify that main.py accepts --replay-dataset and constructs ReplayEnvironment."""
 
@@ -473,10 +407,8 @@ class TestMainReplayIntegration:
 
     def test_run_replay_hybrid_shares_cursor_between_subtasks(self, monkeypatch):
         from examples.piper_real import main as main_module
-        from examples.piper_real import navigation_tool as navigation_tool_mod
         from examples.piper_real import replay_env as replay_env_mod
         from examples.piper_real import replay_manipulation_planner as replay_manipulation_planner_mod
-        from examples.piper_real import replay_navigation_executor as replay_navigation_executor_mod
         from examples.piper_real import task_decomposer as task_decomposer_mod
         from examples.piper_real.planner_config import PlannerConfig
 
@@ -545,25 +477,6 @@ class TestMainReplayIntegration:
                     task_decomposer_mod.Subtask(type="navigate", prompt="nav to table"),
                 ]
 
-        class FakeReplayNavigationExecutor:
-            def __init__(self, environment, on_step_callback=None) -> None:
-                self.environment = environment
-                self.current_step = environment.get_cursor()
-                self.on_step_callback = on_step_callback
-
-            def navigate(self, prompt: str, *, dry_run: bool = False):
-                recorded.setdefault("navigate_starts", []).append(
-                    (prompt, self.environment.get_cursor(), dry_run)
-                )
-                self.environment.set_cursor(self.environment.get_cursor() + 2)
-                self.current_step = self.environment.get_cursor()
-                return navigation_tool_mod.NavigationResult(
-                    ok=True,
-                    prompt=prompt,
-                    routine_name="default_demo",
-                    executed_steps=2,
-                )
-
         class FakePolicyAgent:
             def reset(self) -> None:
                 recorded["policy_resets"] = int(recorded.get("policy_resets", 0)) + 1
@@ -606,11 +519,6 @@ class TestMainReplayIntegration:
         monkeypatch.setattr(replay_env_mod, "ReplayEnvironment", FakeReplayEnvironment)
         monkeypatch.setattr(task_decomposer_mod, "TaskDecomposer", FakeTaskDecomposer)
         monkeypatch.setattr(
-            replay_navigation_executor_mod,
-            "ReplayNavigationExecutor",
-            FakeReplayNavigationExecutor,
-        )
-        monkeypatch.setattr(
             replay_manipulation_planner_mod,
             "ReplayManipulationPromptPlanner",
             FakeManipulationPromptPlanner,
@@ -629,12 +537,11 @@ class TestMainReplayIntegration:
 
         main_module._run_replay_hybrid(args, args.prompt)
 
-        assert recorded["navigate_starts"] == [
-            ("nav to sink", 0, False),
-            ("nav to table", 4, False),
-        ]
+        # navigate subtasks are skipped in replay mode: no cursor advance, no tool run.
+        assert "navigate_starts" not in recorded
         assert recorded["manipulate_prompts"] == ["grasp the plate rim"]
-        assert recorded["policy_obs_steps"] == [2, 3]
+        # Manipulate runs directly from cursor 0 since navigate subtasks no longer advance it.
+        assert recorded["policy_obs_steps"] == [0, 1]
         assert [call["executed_policy_steps"] for call in recorded["replan_calls"]] == [0, 2]
         assert recorded["closed"] is True
 
@@ -745,9 +652,7 @@ class TestMainReplayIntegration:
 
     def test_run_replay_hybrid_aborts_when_manipulate_subtask_hits_cap(self, monkeypatch):
         from examples.piper_real import main as main_module
-        from examples.piper_real import navigation_tool as navigation_tool_mod
         from examples.piper_real import replay_env as replay_env_mod
-        from examples.piper_real import replay_navigation_executor as replay_navigation_executor_mod
         from examples.piper_real import replay_visualizer as replay_visualizer_mod
         from examples.piper_real import task_decomposer as task_decomposer_mod
         from examples.piper_real.planner_config import PlannerConfig
@@ -787,21 +692,6 @@ class TestMainReplayIntegration:
                     task_decomposer_mod.Subtask(type="navigate", prompt="nav to table"),
                 ]
 
-        class FakeReplayNavigationExecutor:
-            def __init__(self, environment, on_step_callback=None) -> None:
-                self.environment = environment
-                self.on_step_callback = on_step_callback
-
-            def navigate(self, prompt: str, *, dry_run: bool = False):
-                recorded.setdefault("navigate_prompts", []).append(prompt)
-                self.environment.set_cursor(self.environment.get_cursor() + 2)
-                return navigation_tool_mod.NavigationResult(
-                    ok=True,
-                    prompt=prompt,
-                    routine_name="default_demo",
-                    executed_steps=2,
-                )
-
         class FakeReplayVisualizer:
             def __init__(self, *_args, **_kwargs) -> None:
                 pass
@@ -817,11 +707,6 @@ class TestMainReplayIntegration:
 
         monkeypatch.setattr(replay_env_mod, "ReplayEnvironment", FakeReplayEnvironment)
         monkeypatch.setattr(task_decomposer_mod, "TaskDecomposer", FakeTaskDecomposer)
-        monkeypatch.setattr(
-            replay_navigation_executor_mod,
-            "ReplayNavigationExecutor",
-            FakeReplayNavigationExecutor,
-        )
         monkeypatch.setattr(replay_visualizer_mod, "ReplayVisualizer", FakeReplayVisualizer)
         monkeypatch.setattr(main_module, "_create_policy_agent", lambda _args: object())
         monkeypatch.setattr(
@@ -850,5 +735,6 @@ class TestMainReplayIntegration:
 
         main_module._run_replay_hybrid(args, args.prompt)
 
-        assert recorded["navigate_prompts"] == ["nav to sink"]
+        # navigate subtasks are skipped in replay mode; the abort is driven by the manipulate cap.
+        assert "navigate_prompts" not in recorded
         assert recorded["closed"] is True
