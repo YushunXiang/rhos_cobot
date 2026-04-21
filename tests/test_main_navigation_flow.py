@@ -7,11 +7,31 @@ def _install_live_main_fakes(monkeypatch, recorded, *, planner_run_routine_resul
     fake_env_module = types.ModuleType("examples.piper_real.env")
     fake_logger_module = types.ModuleType("examples.piper_real.logger")
     fake_llm_planner_module = types.ModuleType("examples.piper_real.llm_planner")
+    fake_replay_manipulation_planner_module = types.ModuleType(
+        "examples.piper_real.replay_manipulation_planner"
+    )
 
     class FakeEnvironment:
-        def __init__(self, reset_position, prompt):
-            recorded.setdefault("environment_init", []).append((reset_position, prompt))
+        def __init__(
+            self,
+            reset_position,
+            prompt,
+            robot_base_topic="/odom_raw",
+            robot_base_cmd_topic="/cmd_vel",
+        ):
+            recorded.setdefault("environment_init", []).append(
+                {
+                    "reset_position": reset_position,
+                    "prompt": prompt,
+                    "robot_base_topic": robot_base_topic,
+                    "robot_base_cmd_topic": robot_base_cmd_topic,
+                }
+            )
             self.ros_operator = SimpleNamespace(name="live-ros")
+
+        def reset(self):
+            recorded.setdefault("events", []).append("environment_reset")
+            recorded["environment_reset_calls"] = recorded.get("environment_reset_calls", 0) + 1
 
         def set_prompt(self, prompt):
             recorded.setdefault("manipulate_prompts", []).append(prompt)
@@ -31,14 +51,39 @@ def _install_live_main_fakes(monkeypatch, recorded, *, planner_run_routine_resul
             recorded.setdefault("planner_run", []).append(task_prompt)
             return planner_run_routine_result
 
+    class FakeReplayManipulationPromptPlanner:
+        def __init__(self, environment, config, task_memory_runtime=None):
+            recorded.setdefault("manipulation_planner_inits", []).append(
+                (environment, config, task_memory_runtime)
+            )
+
     fake_env_module.PiperRealEnvironment = FakeEnvironment
     fake_logger_module.InputJointStateLogger = lambda: recorded.setdefault("input_logger", 0) or None
     fake_logger_module.OutputJointStateLogger = lambda: recorded.setdefault("output_logger", 0) or None
     fake_llm_planner_module.LLMNavigationPlanner = FakeLLMNavigationPlanner
+    fake_replay_manipulation_planner_module.ReplayManipulationPromptPlanner = (
+        FakeReplayManipulationPromptPlanner
+    )
 
     monkeypatch.setitem(sys.modules, "examples.piper_real.env", fake_env_module)
     monkeypatch.setitem(sys.modules, "examples.piper_real.logger", fake_logger_module)
     monkeypatch.setitem(sys.modules, "examples.piper_real.llm_planner", fake_llm_planner_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "examples.piper_real.replay_manipulation_planner",
+        fake_replay_manipulation_planner_module,
+    )
+
+    import examples.piper_real as piper_real_package
+
+    monkeypatch.setattr(piper_real_package, "env", fake_env_module, raising=False)
+    monkeypatch.setattr(piper_real_package, "logger", fake_logger_module, raising=False)
+    monkeypatch.setattr(
+        piper_real_package,
+        "replay_manipulation_planner",
+        fake_replay_manipulation_planner_module,
+        raising=False,
+    )
 
 
 def test_main_calls_navigation_tool_before_manipulation(monkeypatch):
@@ -105,6 +150,21 @@ def test_main_calls_navigation_tool_before_manipulation(monkeypatch):
         "ActionChunkBroker",
         lambda policy, action_horizon: ("broker", action_horizon),
     )
+    class FakePolicyAgent:
+        policy_metadata = {"reset_pose": [0.0] * 14}
+
+        def reset(self):
+            recorded.setdefault("events", []).append("agent_reset")
+            recorded["agent_reset_calls"] = recorded.get("agent_reset_calls", 0) + 1
+
+    def fake_run_manipulation_subtask(*_args, subtask_prompt, **_kwargs):
+        recorded.setdefault("events", []).append("manipulate")
+        recorded.setdefault("manipulation_calls", []).append(subtask_prompt)
+        return {"executed_steps": 3, "prompt_queries": 1, "completed": True}
+
+    monkeypatch.setattr(main_module, "_create_policy_agent", lambda _args: FakePolicyAgent())
+    monkeypatch.setattr(main_module, "_build_ordered_task_memory_runtime", lambda *_args: None)
+    monkeypatch.setattr(main_module, "_run_manipulation_subtask", fake_run_manipulation_subtask)
     monkeypatch.setattr(main_module, "_run_required_server_checks", lambda *args, **kwargs: True)
     monkeypatch.setattr(base_safety_mod, "confirm_base_motion_safety", lambda *args, **kwargs: True)
     monkeypatch.setattr(
@@ -117,6 +177,8 @@ def test_main_calls_navigation_tool_before_manipulation(monkeypatch):
     args = main_module.Args(
         use_llm_planner=True,
         use_robot_base=True,
+        robot_base_topic="/odom",
+        robot_base_cmd_topic="/cmd_vel",
         prompt="move to the table and pick the cup",
         skip_server_checks=True,
     )
@@ -125,10 +187,15 @@ def test_main_calls_navigation_tool_before_manipulation(monkeypatch):
 
     main_module.main(args)
 
+    assert recorded["environment_reset_calls"] == 1
+    assert recorded["environment_init"][0]["robot_base_topic"] == "/odom"
+    assert recorded["environment_init"][0]["robot_base_cmd_topic"] == "/cmd_vel"
+    assert recorded["agent_reset_calls"] == 1
     assert recorded["navigate_calls"][0][0] == "move to table"
     assert recorded["navigate_calls"][0][2] is False
     assert recorded["manipulate_prompts"] == ["pick cup"]
-    assert recorded["runtime_runs"] == 1
+    assert recorded["manipulation_calls"] == ["pick cup"]
+    assert recorded["events"] == ["environment_reset", "agent_reset", "manipulate"]
     assert recorded["stop_calls"] == 1
     assert recorded["environment_close_calls"] == 1
 
@@ -181,6 +248,20 @@ def test_main_aborts_manipulation_when_navigation_tool_fails(monkeypatch):
         "ActionChunkBroker",
         lambda policy, action_horizon: ("broker", action_horizon),
     )
+    class FakePolicyAgent:
+        policy_metadata = {"reset_pose": [0.0] * 14}
+
+        def reset(self):
+            recorded.setdefault("events", []).append("agent_reset")
+            recorded["agent_reset_calls"] = recorded.get("agent_reset_calls", 0) + 1
+
+    def fake_run_manipulation_subtask(*_args, **_kwargs):
+        recorded["runtime_runs"] += 1
+        return {"executed_steps": 1, "prompt_queries": 0, "completed": True}
+
+    monkeypatch.setattr(main_module, "_create_policy_agent", lambda _args: FakePolicyAgent())
+    monkeypatch.setattr(main_module, "_build_ordered_task_memory_runtime", lambda *_args: None)
+    monkeypatch.setattr(main_module, "_run_manipulation_subtask", fake_run_manipulation_subtask)
     monkeypatch.setattr(main_module, "_run_required_server_checks", lambda *args, **kwargs: True)
     monkeypatch.setattr(base_safety_mod, "confirm_base_motion_safety", lambda *args, **kwargs: True)
     monkeypatch.setattr(
@@ -211,6 +292,8 @@ def test_main_aborts_manipulation_when_navigation_tool_fails(monkeypatch):
 
     main_module.main(args)
 
+    assert recorded["environment_reset_calls"] == 1
+    assert recorded["agent_reset_calls"] == 1
     assert recorded["runtime_runs"] == 0
     assert recorded["stop_calls"] == 1
     assert recorded["environment_close_calls"] == 1

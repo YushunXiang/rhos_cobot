@@ -63,6 +63,7 @@ Environment overrides:
   MANIPULATE_REPLAN_INTERVAL_STEPS
                      Policy-step interval between VLM prompt replans in hybrid mode
                      default: 16
+  TASK_SPEC          Common alias for REPLAY_TASK_SPEC when REPLAY_TASK_SPEC is unset
   REPLAY_TASK_SPEC   Ordered task-spec JSON passed to hybrid ordered-task memory
                      default: config/episode4_plate_wash_sandwich.task_spec.json
                      when REPLAY_MODE=hybrid and DATASET basename is episode_4.hdf5
@@ -97,6 +98,8 @@ Environment overrides:
                      default: pi0 (policy/hybrid), planner (planner)
   SAVE_PATH          Forwarded to main.py --save-path for MP4 output
                      default: empty (disabled)
+  VISUALIZE          Forwarded to main.py --visualize when set to 1/true
+                     default: 0
   WAIT_FOR_PI0_READY Set to 0 to skip the preflight wait loop
                      default: 1
   PI0_READY_TIMEOUT_SEC
@@ -140,7 +143,7 @@ MODE_SET=0
 KILL_EXISTING_REPLAY="${KILL_EXISTING_REPLAY:-1}"
 REPLAY_KILL_GRACE_SEC="${REPLAY_KILL_GRACE_SEC:-5}"
 REPLAY_MODE="${REPLAY_MODE:-policy}"
-VISUALIZE=0
+VISUALIZE="${VISUALIZE:-0}"
 SAVE_PATH="${SAVE_PATH:-}"
 MAIN_ARGS=()
 
@@ -247,10 +250,7 @@ case "$REPLAY_MODE" in
     ;;
 esac
 
-if ! [[ "$REPLAY_KILL_GRACE_SEC" =~ ^[0-9]+$ ]]; then
-  echo "REPLAY_KILL_GRACE_SEC must be a non-negative integer." >&2
-  exit 2
-fi
+server_require_nonnegative_int "REPLAY_KILL_GRACE_SEC" "$REPLAY_KILL_GRACE_SEC"
 
 stop_existing_replay_processes() {
   if [[ "${KILL_EXISTING_REPLAY:-1}" != "1" ]]; then
@@ -400,7 +400,7 @@ wait_for_planner_ready() {
 DATASET="${DATASET:-/inspire/qb-ilm/project/robot-reasoning/xiangyushun-p-xiangyushun/yushun/aloha-data/long-horizon-demo/episode_4.hdf5}"
 TASK_NAME="${TASK_NAME:-}"
 DEFAULT_REPLAY_TASK_SPEC="$SERVER_REPO_ROOT/config/episode4_plate_wash_sandwich.task_spec.json"
-REPLAY_TASK_SPEC="${REPLAY_TASK_SPEC:-}"
+REPLAY_TASK_SPEC="${REPLAY_TASK_SPEC:-${TASK_SPEC:-}}"
 REPLAY_TASK_SPEC_AUTO_ENABLE=1
 if [[ "${REPLAY_TASK_SPEC,,}" == "none" ]]; then
   REPLAY_TASK_SPEC=""
@@ -418,6 +418,9 @@ if [[ -n "${PROMPT:-}" ]]; then
 elif [[ -n "$TASK_NAME" ]]; then
   PROMPT="$(server_lookup_task_prompt "$TASK_NAME")"
   PROMPT_SOURCE="task_catalog:$TASK_NAME"
+elif [[ -n "$REPLAY_TASK_SPEC" ]]; then
+  PROMPT="$(server_read_task_spec_total_task "$REPLAY_TASK_SPEC")"
+  PROMPT_SOURCE="task_spec:$REPLAY_TASK_SPEC"
 elif [[ "$REPLAY_MODE" == "planner" ]]; then
   PROMPT="long-horizon replay planner validation"
 else
@@ -482,15 +485,9 @@ if [[ "$NEED_PI0" == "1" ]]; then
   fi
 fi
 
-if ! [[ "$MANIPULATE_MAX_STEPS" =~ ^[0-9]+$ ]] || (( MANIPULATE_MAX_STEPS <= 0 )); then
-  echo "MANIPULATE_MAX_STEPS must be a positive integer." >&2
-  exit 2
-fi
-
-if ! [[ "$MANIPULATE_REPLAN_INTERVAL_STEPS" =~ ^[0-9]+$ ]] || (( MANIPULATE_REPLAN_INTERVAL_STEPS <= 0 )); then
-  echo "MANIPULATE_REPLAN_INTERVAL_STEPS must be a positive integer." >&2
-  exit 2
-fi
+server_require_nonnegative_int "MAX_EPISODE_STEPS" "$MAX_EPISODE_STEPS"
+server_require_positive_int "MANIPULATE_MAX_STEPS" "$MANIPULATE_MAX_STEPS"
+server_require_positive_int "MANIPULATE_REPLAN_INTERVAL_STEPS" "$MANIPULATE_REPLAN_INTERVAL_STEPS"
 
 PLANNER_BASE_URL=""
 PLANNER_REPLANNER_ENABLE_THINKING="${PLANNER_REPLANNER_ENABLE_THINKING:-$(server_cfg_optional planner.manipulation_replanner_enable_thinking)}"
@@ -526,32 +523,12 @@ if [[ "$NEED_PLANNER" == "1" ]]; then
   PLANNER_BASE_URL="http://$PLANNER_HOST:$PLANNER_PORT/v1"
 fi
 
-normalize_bool() {
-  local raw="$1"
-  case "${raw,,}" in
-    1|true|yes|on)
-      printf '%s\n' "1"
-      ;;
-    0|false|no|off)
-      printf '%s\n' "0"
-      ;;
-    "")
-      printf '%s\n' ""
-      ;;
-    *)
-      echo "Boolean value must be one of: 0, 1, true, false, yes, no, on, off" >&2
-      return 1
-      ;;
-  esac
-}
-
-PLANNER_REPLANNER_ENABLE_THINKING="$(normalize_bool "$PLANNER_REPLANNER_ENABLE_THINKING")"
+PLANNER_REPLANNER_ENABLE_THINKING="$(server_normalize_bool "$PLANNER_REPLANNER_ENABLE_THINKING")"
+NAVIGATION_ONLY="$(server_normalize_bool "$NAVIGATION_ONLY")"
+VISUALIZE="$(server_normalize_bool "$VISUALIZE")"
 
 if [[ -n "$PLANNER_REPLANNER_MAX_TOKENS" ]]; then
-  if ! [[ "$PLANNER_REPLANNER_MAX_TOKENS" =~ ^[0-9]+$ ]] || (( PLANNER_REPLANNER_MAX_TOKENS <= 0 )); then
-    echo "PLANNER_REPLANNER_MAX_TOKENS must be a positive integer." >&2
-    exit 2
-  fi
+  server_require_positive_int "PLANNER_REPLANNER_MAX_TOKENS" "$PLANNER_REPLANNER_MAX_TOKENS"
 fi
 
 if [[ ! -f "$DATASET" ]]; then
@@ -662,6 +639,7 @@ fi
 
 if [[ "$REPLAY_MODE" == "hybrid" ]]; then
   cmd+=(
+    --use-llm-planner
     --planner.base-url "$PLANNER_BASE_URL"
     --planner.model "$PLANNER_MODEL"
     --replay-manipulate-max-steps "$MANIPULATE_MAX_STEPS"

@@ -14,6 +14,8 @@ from examples.piper_real import ros_oper as _ros_oper
 
 #this is  a camera name list for config
 CAMERA_NAMES = ['cam_high', 'cam_right_wrist', 'cam_left_wrist']
+DEFAULT_ROBOT_BASE_TOPIC = "/odom_raw"
+DEFAULT_ROBOT_BASE_CMD_TOPIC = "/cmd_vel"
 
 ros_config = {
     "img_front_topic": "/camera_f/color/image_raw",
@@ -30,8 +32,8 @@ ros_config = {
     "puppet_arm_left_cmd_topic": "/master/joint_left",
     "puppet_arm_right_cmd_topic": "/master/joint_right",
 
-    "robot_base_topic": "/odom_raw",
-    "robot_base_cmd_topic": "/cmd_vel",
+    "robot_base_topic": DEFAULT_ROBOT_BASE_TOPIC,
+    "robot_base_cmd_topic": DEFAULT_ROBOT_BASE_CMD_TOPIC,
     "use_robot_base": False,
 
     "publish_rate": 30,
@@ -85,6 +87,8 @@ class PiperRealEnv:
         *,
         reset_pos: Optional[List[float]] = None,
         setup_robots: bool = False,
+        robot_base_topic: str = DEFAULT_ROBOT_BASE_TOPIC,
+        robot_base_cmd_topic: str = DEFAULT_ROBOT_BASE_CMD_TOPIC,
     ):
         self.spin_thread = None
         if init_node:
@@ -93,9 +97,12 @@ class PiperRealEnv:
             self.spin_thread.daemon = True
             self.spin_thread.start()
         self._reset_pos = reset_pos
-        self.ros_operator = _ros_oper.RosOperator(ros_config)
-        self.rate = rospy.Rate(ros_config["publish_rate"])
-        self.pre_action = np.zeros(ros_config['state_dim'])
+        self.ros_config = dict(ros_config)
+        self.ros_config["robot_base_topic"] = robot_base_topic
+        self.ros_config["robot_base_cmd_topic"] = robot_base_cmd_topic
+        self.ros_operator = _ros_oper.RosOperator(self.ros_config)
+        self.rate = rospy.Rate(self.ros_config["publish_rate"])
+        self.pre_action = np.zeros(self.ros_config['state_dim'])
 
     def spin(self):
         try:
@@ -213,9 +220,9 @@ class PiperRealEnv:
                 observation=self.get_observation()
             )
 
-        if ros_config["use_actions_interpolation"]:
+        if self.ros_config["use_actions_interpolation"]:
             print(f"use_actions_interpolation")
-            interp_actions = interpolate_action(ros_config, self.pre_action, action)
+            interp_actions = interpolate_action(self.ros_config, self.pre_action, action)
         else:
             interp_actions = action[np.newaxis, :]
 
@@ -225,7 +232,7 @@ class PiperRealEnv:
             left_action = act[:state_len]
             right_action = act[state_len:]
 
-            if  not ros_config["disable_puppet_arm"]:
+            if  not self.ros_config["disable_puppet_arm"]:
                 self.ros_operator.puppet_arm_publish(left_action, right_action)  # puppet_arm_publish_continuous_thread
 
             self.rate.sleep()
@@ -248,9 +255,13 @@ def make_real_env(
     *,
     reset_position: Optional[List[float]] = None,
     setup_robots: bool = True,
+    robot_base_topic: str = DEFAULT_ROBOT_BASE_TOPIC,
+    robot_base_cmd_topic: str = DEFAULT_ROBOT_BASE_CMD_TOPIC,
 ) -> PiperRealEnv:
     return PiperRealEnv(
         init_node,
         reset_pos=reset_position,
         setup_robots=setup_robots,
+        robot_base_topic=robot_base_topic,
+        robot_base_cmd_topic=robot_base_cmd_topic,
     )

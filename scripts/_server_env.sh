@@ -99,6 +99,61 @@ server_lookup_task_prompt() {
     "$task_name"
 }
 
+server_read_task_spec_total_task() {
+  local task_spec="$1"
+
+  if [[ -z "$task_spec" ]]; then
+    echo "task spec path must be non-empty." >&2
+    return 1
+  fi
+  if [[ ! -f "$task_spec" ]]; then
+    echo "Task spec file does not exist: $task_spec" >&2
+    return 1
+  fi
+
+  python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["total_task"])' "$task_spec"
+}
+
+server_normalize_bool() {
+  local raw="$1"
+
+  case "${raw,,}" in
+    1|true|yes|on)
+      printf '%s\n' "1"
+      ;;
+    0|false|no|off)
+      printf '%s\n' "0"
+      ;;
+    "")
+      printf '%s\n' ""
+      ;;
+    *)
+      echo "Boolean value must be one of: 0, 1, true, false, yes, no, on, off" >&2
+      return 1
+      ;;
+  esac
+}
+
+server_require_positive_int() {
+  local name="$1"
+  local value="$2"
+
+  if ! [[ "$value" =~ ^[0-9]+$ ]] || (( 10#$value <= 0 )); then
+    echo "$name must be a positive integer." >&2
+    return 1
+  fi
+}
+
+server_require_nonnegative_int() {
+  local name="$1"
+  local value="$2"
+
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "$name must be a non-negative integer." >&2
+    return 1
+  fi
+}
+
 server_remote_ssh_target() {
   local service_name="$1"
   local ssh_target

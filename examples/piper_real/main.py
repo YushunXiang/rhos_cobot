@@ -25,7 +25,15 @@ from examples.piper_real.planner_config import PlannerConfig
 DEFAULT_MAX_EPISODE_STEPS = 1000
 DEFAULT_REPLAY_MANIPULATE_MAX_STEPS = 64
 DEFAULT_REPLAY_MANIPULATE_REPLAN_INTERVAL_STEPS = 16
+DEFAULT_ROBOT_BASE_TOPIC = "/odom_raw"
+DEFAULT_ROBOT_BASE_CMD_TOPIC = "/cmd_vel"
 _VALID_REPLAY_MODES = {"policy", "planner", "hybrid"}
+
+
+def _restore_cli_logging() -> None:
+    """Keep Python logging visible after ROS node initialization."""
+
+    logging.basicConfig(level=logging.INFO, force=True)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -87,6 +95,8 @@ class Args:
     )
     use_llm_planner: bool = False
     use_robot_base: bool = False
+    robot_base_topic: str = DEFAULT_ROBOT_BASE_TOPIC
+    robot_base_cmd_topic: str = DEFAULT_ROBOT_BASE_CMD_TOPIC
     navigation_only: bool = False  # Run navigation only, skip manipulation
     skip_server_checks: bool = False
     server_check_timeout_sec: float = 5.0
@@ -199,7 +209,7 @@ def _resolve_replay_mode(args: Args) -> str:
     return replay_mode
 
 
-def _build_replay_ordered_task_memory_runtime(args: Args, environment):
+def _build_ordered_task_memory_runtime(args: Args, environment):
     task_spec_path = args.planner.task_spec_path.strip()
     if not task_spec_path:
         return None
@@ -213,13 +223,13 @@ def _build_replay_ordered_task_memory_runtime(args: Args, environment):
         )
     except Exception as exc:  # noqa: BLE001
         logging.error(
-            "Replay hybrid could not initialize ordered task memory from %s: %s",
+            "Could not initialize ordered task memory from %s: %s",
             task_spec_path,
             exc,
         )
         return None
 
-    logging.info("Replay hybrid ordered task memory enabled: %s", task_spec_path)
+    logging.info("Ordered task memory enabled: %s", task_spec_path)
     return runtime
 
 
@@ -462,7 +472,7 @@ def _export_replay_manipulation_cap_debug(
     return export_dir
 
 
-def _run_replay_manipulation_subtask(
+def _run_manipulation_subtask(
     environment,
     agent: _policy_agent.PolicyAgent,
     manipulation_planner,
@@ -493,10 +503,25 @@ def _run_replay_manipulation_subtask(
         stall_steps=progress_stall_steps,
         regression_threshold=progress_regression_threshold,
     )
+    logging.info(
+        "Manipulate subtask %s/%s start: prompt=%s max_steps=%d "
+        "replan_interval_steps=%d has_progress_head=%s",
+        subtask_index if subtask_index is not None else "?",
+        total_subtasks if total_subtasks is not None else "?",
+        subtask_prompt,
+        max_steps,
+        replan_interval_steps,
+        has_progress_head,
+    )
 
     def _replan(policy_steps: int) -> bool:
         nonlocal current_policy_prompt
         nonlocal prompt_queries
+        logging.info(
+            "Replay manipulate replanner query at %d policy steps for: %s",
+            policy_steps,
+            subtask_prompt,
+        )
         try:
             decision = manipulation_planner.plan(
                 task_prompt=subtask_prompt,
@@ -1014,7 +1039,7 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
         max_steps=args.max_episode_steps if args.max_episode_steps > 0 else None,
     )
 
-    ordered_task_memory_runtime = _build_replay_ordered_task_memory_runtime(
+    ordered_task_memory_runtime = _build_ordered_task_memory_runtime(
         args,
         environment,
     )
@@ -1133,7 +1158,7 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
             assert (
                 manipulation_planner is not None
             ), "hybrid manipulate subtask requires a prompt replanner"
-            manipulation_result = _run_replay_manipulation_subtask(
+            manipulation_result = _run_manipulation_subtask(
                 environment,
                 policy_agent,
                 manipulation_planner,
@@ -1217,7 +1242,294 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
         environment.close()
 
 
+def _log_real_hybrid_summary(
+    *,
+    total_subtasks: int,
+    navigate_subtasks: int,
+    manipulate_subtasks: int,
+    policy_steps: int,
+    prompt_queries: int,
+) -> None:
+    logging.info(
+        "Real hybrid completed: subtasks=%d, navigate=%d, manipulate=%d, "
+        "policy_steps=%d, prompt_queries=%d",
+        total_subtasks,
+        navigate_subtasks,
+        manipulate_subtasks,
+        policy_steps,
+        prompt_queries,
+    )
+
+
+def _run_real_hybrid(args: Args, prompt: str) -> None:
+    """Real-robot two-layer LLM planner loop.
+
+    Mirrors ``_run_replay_hybrid`` but drives ``PiperRealEnvironment`` and calls
+    ``navigation_tool.navigate`` for navigate subtasks. Shares the manipulation
+    inner loop (``_run_manipulation_subtask``), the VLM prompt replanner
+    (``ReplayManipulationPromptPlanner``) and the ordered task-memory runtime
+    (``ReplayOrderedTaskMemoryRuntime``).
+    """
+
+    from examples.piper_real import base_safety as _base_safety
+    from examples.piper_real import env as _env
+    from examples.piper_real import logger as _logger
+    from examples.piper_real import navigation_tool as _navigation_tool
+    from examples.piper_real import (
+        replay_manipulation_planner as _replay_manipulation_planner,
+    )
+
+    logging.info(
+        "Real hybrid entry: pid=%s source=%s manipulate_max_steps=%d "
+        "replan_interval_steps=%d max_episode_steps=%d task_spec=%s "
+        "robot_base_topic=%s robot_base_cmd_topic=%s",
+        os.getpid(),
+        Path(__file__).resolve(),
+        args.replay_manipulate_max_steps,
+        args.replay_manipulate_replan_interval_steps,
+        args.max_episode_steps,
+        args.planner.task_spec_path or "<unset>",
+        args.robot_base_topic,
+        args.robot_base_cmd_topic,
+    )
+
+    if args.replay_manipulate_max_steps <= 0:
+        logging.error(
+            "--replay-manipulate-max-steps must be positive in real hybrid mode."
+        )
+        return
+
+    if args.replay_manipulate_replan_interval_steps <= 0:
+        logging.error(
+            "--replay-manipulate-replan-interval-steps must be positive in real hybrid mode."
+        )
+        return
+
+    if args.use_robot_base:
+        args.robot_base_topic = args.robot_base_topic.strip()
+        args.robot_base_cmd_topic = args.robot_base_cmd_topic.strip()
+        if not args.robot_base_topic:
+            logging.error("--robot-base-topic must be non-empty when --use-robot-base.")
+            return
+        if not args.robot_base_cmd_topic:
+            logging.error("--robot-base-cmd-topic must be non-empty when --use-robot-base.")
+            return
+
+    args.planner.validate_service_config()
+    args.planner.validate_motion_limits()
+
+    if not _run_required_server_checks(args, needs_planner=True):
+        return
+
+    # Step 1: Decompose task up-front so we know what (if anything) we need to
+    # spin up downstream.
+    from examples.piper_real import task_decomposer as _task_decomposer
+
+    decomposer = _task_decomposer.TaskDecomposer(args.planner)
+    try:
+        subtask_list = decomposer.decompose(prompt)
+    except _task_decomposer.DecompositionError as exc:
+        logging.error("Task decomposition failed: %s", exc)
+        return
+
+    has_navigate = any(s.type == "navigate" for s in subtask_list)
+    has_manipulate = any(s.type == "manipulate" for s in subtask_list)
+    needs_server = has_manipulate and not args.navigation_only
+    needs_ros_environment = needs_server or (args.use_robot_base and has_navigate)
+
+    # Step 2: Safety confirmation (once, if base motion requested).
+    if args.use_robot_base and has_navigate:
+        if not _base_safety.confirm_base_motion_safety(
+            prompt,
+            use_llm_planner=True,
+            # pass False to suppress misleading "policy-driven base control" label
+            use_robot_base=False,
+        ):
+            logging.error("Base motion aborted before execution.")
+            return
+
+    # Step 3: Create pi0 connection + policy agent if needed.
+    policy_agent = None
+    reset_position = None
+    if needs_server:
+        if not _run_required_server_checks(args, needs_pi0=True):
+            return
+        policy_agent = _create_policy_agent(args)
+        reset_position = getattr(policy_agent, "policy_metadata", {}).get("reset_pose")
+
+    # Step 4: Create shared ROS environment if needed.
+    environment = None
+    if needs_ros_environment:
+        if args.save_log and needs_server:
+            _logger.InputJointStateLogger()
+            _logger.OutputJointStateLogger()
+
+        environment = _env.PiperRealEnvironment(
+            reset_position=reset_position,
+            prompt=prompt,
+            robot_base_topic=args.robot_base_topic,
+            robot_base_cmd_topic=args.robot_base_cmd_topic,
+        )
+        _restore_cli_logging()
+        logging.info("Real hybrid ROS environment initialized.")
+
+    # Step 5: Initialize the real environment before any VLM frame read or
+    # policy action. Replay environments can read frame 0 directly; real
+    # hardware needs reset() to populate the initial timestep.
+    if needs_server and environment is not None:
+        environment.reset()
+        _restore_cli_logging()
+        logging.info("Real hybrid environment reset complete.")
+        if policy_agent is not None:
+            policy_agent.reset()
+            logging.info("Real hybrid policy agent reset complete.")
+
+    # Step 6: Build ordered task memory + manipulation replanner (manipulate only).
+    manipulation_planner = None
+    if needs_server and environment is not None:
+        ordered_task_memory_runtime = _build_ordered_task_memory_runtime(
+            args,
+            environment,
+        )
+        manipulation_planner = (
+            _replay_manipulation_planner.ReplayManipulationPromptPlanner(
+                environment,
+                args.planner,
+                task_memory_runtime=ordered_task_memory_runtime,
+            )
+            if ordered_task_memory_runtime is not None
+            else _replay_manipulation_planner.ReplayManipulationPromptPlanner(
+                environment,
+                args.planner,
+            )
+        )
+        logging.info("Real hybrid manipulation replanner initialized.")
+
+    completed_navigate = 0
+    completed_manipulate = 0
+    policy_steps = 0
+    prompt_queries = 0
+    navigation_only_ran = False
+
+    try:
+        for idx, subtask in enumerate(subtask_list):
+            logging.info(
+                "Executing subtask %d/%d [%s]: %s",
+                idx + 1,
+                len(subtask_list),
+                subtask.type,
+                subtask.prompt,
+            )
+
+            if subtask.type == "navigate":
+                if args.navigation_only and navigation_only_ran:
+                    logging.info(
+                        "Skipping additional navigate subtask %d/%d in navigation-only mode: %s",
+                        idx + 1,
+                        len(subtask_list),
+                        subtask.prompt,
+                    )
+                    continue
+
+                ros_operator = None if environment is None else environment.ros_operator
+                result = _navigation_tool.navigate(
+                    subtask.prompt,
+                    ros_operator,
+                    dry_run=not args.use_robot_base,
+                )
+                if not result.ok:
+                    logging.error(
+                        "Navigation failed at subtask %d/%d: %s",
+                        idx + 1,
+                        len(subtask_list),
+                        result.error or "unknown error",
+                    )
+                    return
+                navigation_only_ran = True
+                completed_navigate += 1
+                logging.info(
+                    "Navigate subtask %d/%d succeeded via routine %s.",
+                    idx + 1,
+                    len(subtask_list),
+                    result.routine_name,
+                )
+                continue
+
+            if args.navigation_only:
+                logging.info("Manipulate (skipped): %s", subtask.prompt)
+                continue
+
+            assert (
+                policy_agent is not None and manipulation_planner is not None
+                and environment is not None
+            ), "manipulate subtask requires pi0 policy agent + manipulation planner + env"
+
+            environment.set_prompt(subtask.prompt)
+            manipulation_result = _run_manipulation_subtask(
+                environment,
+                policy_agent,
+                manipulation_planner,
+                subtask_prompt=subtask.prompt,
+                max_steps=args.replay_manipulate_max_steps,
+                replan_interval_steps=args.replay_manipulate_replan_interval_steps,
+                progress_complete_threshold=args.planner.progress_complete_threshold,
+                progress_stall_threshold=args.planner.progress_stall_threshold,
+                progress_stall_steps=args.planner.progress_stall_steps,
+                progress_regression_threshold=args.planner.progress_regression_threshold,
+                progress_confirm_with_replanner=args.planner.progress_confirm_with_replanner,
+                debug_export_dir="",
+                subtask_index=idx + 1,
+                total_subtasks=len(subtask_list),
+                visualizer=None,
+            )
+            executed_steps = int(manipulation_result["executed_steps"])
+            policy_steps += executed_steps
+            prompt_queries += int(manipulation_result["prompt_queries"])
+            if bool(manipulation_result.get("completed", False)):
+                completed_manipulate += 1
+                logging.info(
+                    "Manipulate subtask %d/%d completed after %d policy steps, "
+                    "%d prompt queries.",
+                    idx + 1,
+                    len(subtask_list),
+                    executed_steps,
+                    int(manipulation_result["prompt_queries"]),
+                )
+            else:
+                stop_reason = str(manipulation_result.get("stop_reason", "incomplete"))
+                logging.error(
+                    "Manipulate subtask %d/%d did not complete after %d policy steps, "
+                    "%d prompt queries; stop_reason=%s",
+                    idx + 1,
+                    len(subtask_list),
+                    executed_steps,
+                    int(manipulation_result["prompt_queries"]),
+                    stop_reason,
+                )
+                return
+
+        _log_real_hybrid_summary(
+            total_subtasks=len(subtask_list),
+            navigate_subtasks=completed_navigate,
+            manipulate_subtasks=completed_manipulate,
+            policy_steps=policy_steps,
+            prompt_queries=prompt_queries,
+        )
+    finally:
+        if environment is not None:
+            if args.use_robot_base:
+                _base_safety.stop_base(environment.ros_operator)
+            close = getattr(environment, "close", None)
+            if callable(close):
+                close()
+
+
 def main(args: Args) -> None:
+    logging.info(
+        "Piper main source: pid=%s source=%s",
+        os.getpid(),
+        Path(__file__).resolve(),
+    )
     prompt = args.prompt.strip()
 
     if args.replay_dataset:
@@ -1290,6 +1602,8 @@ def main(args: Args) -> None:
         environment = _env.PiperRealEnvironment(
             reset_position=metadata.get("reset_pose"),
             prompt=args.prompt,
+            robot_base_topic=args.robot_base_topic,
+            robot_base_cmd_topic=args.robot_base_cmd_topic,
         )
 
         runtime = _runtime.Runtime(
@@ -1308,141 +1622,8 @@ def main(args: Args) -> None:
         runtime.run()
         return
 
-    # ── Two-layer LLM planner ────────────────────────────────────────
-    args.planner.validate_service_config()
-
-    if not _run_required_server_checks(args, needs_planner=True):
-        return
-
-    # Step 1: Decompose task
-    decomposer = _task_decomposer.TaskDecomposer(args.planner)
-    try:
-        subtask_list = decomposer.decompose(prompt)
-    except _task_decomposer.DecompositionError as exc:
-        logging.error("Task decomposition failed: %s", exc)
-        return
-
-    has_navigate = any(s.type == "navigate" for s in subtask_list)
-    has_manipulate = any(s.type == "manipulate" for s in subtask_list)
-    needs_server = has_manipulate and not args.navigation_only
-    needs_ros_environment = needs_server or (args.use_robot_base and has_navigate)
-
-    # Step 2: Safety confirmation (once, if base motion requested)
-    if args.use_robot_base and has_navigate:
-        if not _base_safety.confirm_base_motion_safety(
-            prompt,
-            use_llm_planner=True,
-            use_robot_base=False,  # pass False to suppress misleading "policy-driven base control" label
-        ):
-            logging.error("Base motion aborted before execution.")
-            return
-
-    # Step 3: Create inference server connection if needed
-    ws_client_policy = None
-    metadata = {}
-    if needs_server:
-        if not _run_required_server_checks(args, needs_pi0=True):
-            return
-
-        ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
-            host=args.host,
-            port=args.port,
-        )
-        metadata = ws_client_policy.get_server_metadata()
-        logging.info("Server metadata: %s", metadata)
-
-    # Step 4: Create shared environment if needed
-    environment = None
-    if needs_ros_environment:
-        if args.save_log and needs_server:
-            _logger.InputJointStateLogger()
-            _logger.OutputJointStateLogger()
-
-        environment = _env.PiperRealEnvironment(
-            reset_position=metadata.get("reset_pose") if needs_server else None,
-            prompt=prompt,
-        )
-
-    # Step 6: Execute subtask loop
-    navigation_only_ran = False
-    try:
-        for idx, subtask in enumerate(subtask_list):
-            logging.info(
-                "Executing subtask %d/%d [%s]: %s",
-                idx + 1,
-                len(subtask_list),
-                subtask.type,
-                subtask.prompt,
-            )
-
-            if subtask.type == "navigate":
-                if args.navigation_only and navigation_only_ran:
-                    logging.info(
-                        "Skipping additional navigate subtask %d/%d in navigation-only mode: %s",
-                        idx + 1,
-                        len(subtask_list),
-                        subtask.prompt,
-                    )
-                    continue
-
-                ros_operator = None if environment is None else environment.ros_operator
-                result = _navigation_tool.navigate(
-                    subtask.prompt,
-                    ros_operator,
-                    dry_run=not args.use_robot_base,
-                )
-                if not result.ok:
-                    logging.error(
-                        "Navigation failed at subtask %d/%d: %s",
-                        idx + 1,
-                        len(subtask_list),
-                        result.error or "unknown error",
-                    )
-                    return
-                navigation_only_ran = True
-                logging.info(
-                    "Navigate subtask %d/%d succeeded via routine %s.",
-                    idx + 1,
-                    len(subtask_list),
-                    result.routine_name,
-                )
-
-            elif subtask.type == "manipulate":
-                if args.navigation_only:
-                    logging.info("Manipulate (skipped): %s", subtask.prompt)
-                    continue
-
-                assert (
-                    ws_client_policy is not None
-                ), "manipulate subtask requires server connection"
-                environment.set_prompt(subtask.prompt)
-                # TODO: integrate progress-first logic (see replay/hybrid path)
-                runtime = _runtime.Runtime(
-                    environment=environment,
-                    agent=_policy_agent.PolicyAgent(
-                        policy=action_chunk_broker.ActionChunkBroker(
-                            policy=ws_client_policy,
-                            action_horizon=args.action_horizon,
-                        )
-                    ),
-                    subscribers=[],
-                    max_hz=50,
-                    num_episodes=args.num_episodes,
-                    max_episode_steps=args.max_episode_steps,
-                )
-                runtime.run()
-                logging.info(
-                    "Manipulate subtask %d/%d completed.", idx + 1, len(subtask_list)
-                )
-
-        logging.info("All subtasks completed successfully.")
-    finally:
-        if environment is not None:
-            if args.use_robot_base:
-                _base_safety.stop_base(environment.ros_operator)
-            close = getattr(environment, "close", None)
-            if callable(close):
-                close()
+    # ── Two-layer LLM planner (real robot) ───────────────────────────
+    _run_real_hybrid(args, prompt)
 
 
 if __name__ == "__main__":

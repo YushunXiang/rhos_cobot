@@ -36,6 +36,10 @@ source examples/piper_real/.venv/bin/activate
 python -m examples.piper_real.main
 ```
 
+In hybrid mode the VLM replanner revises each manipulate subtask's prompt every
+`MANIPULATE_REPLAN_INTERVAL_STEPS` policy steps and advances subtasks on the
+replanner's `complete` signal; `MANIPULATE_MAX_STEPS` bounds each subtask.
+
 All scripts are invoked as Python modules (`python -m scripts.<subdir>.<name>`).
 
 ## Architecture

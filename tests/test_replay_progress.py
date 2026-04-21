@@ -92,7 +92,7 @@ def test_replay_manipulation_subtask_uses_progress_before_replanner():
             return SimpleNamespace(action="continue", prompt="unused", reason="unused")
 
     planner = FakePlanner()
-    result = main_module._run_replay_manipulation_subtask(
+    result = main_module._run_manipulation_subtask(
         FakeEnvironment(),
         FakeAgent(),
         planner,
@@ -156,7 +156,7 @@ def test_replay_manipulation_subtask_falls_back_to_replanner_without_progress_he
     env = FakeEnvironment()
     agent = FakeAgent()
     planner = FakePlanner()
-    result = main_module._run_replay_manipulation_subtask(
+    result = main_module._run_manipulation_subtask(
         env,
         agent,
         planner,
@@ -211,7 +211,7 @@ def test_replay_manipulation_subtask_reports_step_cap_when_incomplete():
         def plan(self, **kwargs):
             return SimpleNamespace(action="continue", prompt="keep trying", reason="not done")
 
-    result = main_module._run_replay_manipulation_subtask(
+    result = main_module._run_manipulation_subtask(
         FakeEnvironment(),
         FakeAgent(),
         FakePlanner(),

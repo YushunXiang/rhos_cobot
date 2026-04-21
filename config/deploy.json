@@ -1,10 +1,9 @@
 {
   "name": "deploy_tap_wash_sandwich",
-  "total_task": "Complete this long-horizon task in the exact order below. The robot is already positioned at the sink area, so DO NOT insert any initial navigation subtask before Phase 1. Phase 1, dish washing (at the sink, no navigation needed): turn on the water tap, then turn off the water tap, and return the plate to its original position. Phase 2, transition: move from the sink area to the plate area. Phase 3, sandwich assembly (at the plate area, no further navigation needed): place the first slice of bread on the plate, place the lettuce leaf on the first slice of bread, and place the second slice of bread on the lettuce leaf. Do not skip, reorder, or revisit earlier subtasks unless the visual evidence clearly shows the current stage estimate is wrong.",
+  "total_task": "Complete this long-horizon task in the exact order below. The robot is already positioned at the sink area, so DO NOT insert any initial navigation subtask before Phase 1. Phase 1, dish washing (at the sink, no navigation needed): turn on the water tap, and then turn off the water tap. Phase 2, transition: move from the sink area to the plate area. Phase 3, sandwich assembly (at the plate area, no further navigation needed): place the first slice of bread on the plate, place the lettuce leaf on the first slice of bread, and place the second slice of bread on the lettuce leaf. Do not skip, reorder, or revisit earlier subtasks unless the visual evidence clearly shows the current stage estimate is wrong.",
   "subtasks": [
     "Turn on the water tap.",
     "Turn off the water tap.",
-    "Return the plate to its original position.",
     "Move from the sink area to the plate area",
     "Place the first slice of bread on the plate.",
     "Place the lettuce leaf on the first slice of bread.",

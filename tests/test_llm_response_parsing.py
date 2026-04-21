@@ -378,6 +378,172 @@ def test_replay_manipulation_planner_includes_ordered_task_memory_context(monkey
     )
 
 
+def test_ordered_task_spec_matches_decomposer_prompts_without_terminal_punctuation():
+    from examples.piper_real.replay_task_memory import OrderedTaskSpec
+
+    task_spec = OrderedTaskSpec(
+        name="tap",
+        total_task="tap",
+        subtasks=[
+            "Turn on the water tap.",
+            "Turn off the water tap.",
+        ],
+    )
+
+    assert task_spec.subtask_index("turn on the water tap") == 0
+    assert task_spec.subtask_index("turn off the water tap") == 1
+
+
+def test_replay_manipulation_planner_rejects_prompt_for_wrong_ordered_subtask(monkeypatch):
+    from examples.piper_real.planner_config import PlannerConfig
+    from examples.piper_real.replay_manipulation_planner import ReplayManipulationPromptPlanner
+    from examples.piper_real.replay_task_memory import OrderedTaskSpec
+    from examples.piper_real.replay_task_memory import TaskStageDecision
+
+    class FakeReplayEnvironment:
+        num_steps = 2
+        camera_names = ("cam_high",)
+
+        def get_cursor(self) -> int:
+            return 0
+
+        def get_image(self, _cam_name: str, _idx: int):
+            import numpy as np
+
+            return np.zeros((8, 8, 3), dtype=np.uint8)
+
+    class FakeTaskMemoryRuntime:
+        def __init__(self) -> None:
+            self.task_spec = OrderedTaskSpec(
+                name="tap",
+                total_task="tap",
+                subtasks=[
+                    "Turn on the water tap.",
+                    "Turn off the water tap.",
+                ],
+            )
+            self._last_decision = TaskStageDecision(
+                current_subtask="Turn on the water tap.",
+                current_subtask_index=0,
+                completed_subtasks=[],
+                next_subtask="Turn off the water tap.",
+                confidence=0.95,
+                evidence="tap is off",
+                memory_update="tap is off",
+                state_summary="tap is off",
+            )
+
+        def build_context(self) -> dict[str, str]:
+            return {
+                "ordered_task_spec_text": self.task_spec.as_prompt_text(),
+                "working_memory_text": "Task progress: 0/2 (0%)",
+                "stage_estimate_text": '{"current_subtask":"Turn on the water tap."}',
+            }
+
+    replanner = ReplayManipulationPromptPlanner(
+        FakeReplayEnvironment(),
+        PlannerConfig(base_url="http://unused", model="test"),
+        task_memory_runtime=FakeTaskMemoryRuntime(),
+    )
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content='{"action":"continue","prompt":"turn on the water tap","reason":"regressed"}',
+                    reasoning=None,
+                )
+            )
+        ]
+    )
+    monkeypatch.setattr(replanner.client.chat.completions, "create", lambda **_kwargs: response)
+
+    decision = replanner.plan(
+        task_prompt="turn off the water tap",
+        current_policy_prompt="turn off the water tap",
+        executed_policy_steps=0,
+        prompt_history=[],
+    )
+
+    assert decision.action == "continue"
+    assert decision.prompt == "turn off the water tap"
+    assert "different ordered subtask" in decision.reason
+
+
+def test_replay_manipulation_planner_rejects_complete_before_stage_confirms_target(monkeypatch):
+    from examples.piper_real.planner_config import PlannerConfig
+    from examples.piper_real.replay_manipulation_planner import ReplayManipulationPromptPlanner
+    from examples.piper_real.replay_task_memory import OrderedTaskSpec
+    from examples.piper_real.replay_task_memory import TaskStageDecision
+
+    class FakeReplayEnvironment:
+        num_steps = 2
+        camera_names = ("cam_high",)
+
+        def get_cursor(self) -> int:
+            return 0
+
+        def get_image(self, _cam_name: str, _idx: int):
+            import numpy as np
+
+            return np.zeros((8, 8, 3), dtype=np.uint8)
+
+    class FakeTaskMemoryRuntime:
+        def __init__(self) -> None:
+            self.task_spec = OrderedTaskSpec(
+                name="tap",
+                total_task="tap",
+                subtasks=[
+                    "Turn on the water tap.",
+                    "Turn off the water tap.",
+                ],
+            )
+            self._last_decision = TaskStageDecision(
+                current_subtask="Turn on the water tap.",
+                current_subtask_index=0,
+                completed_subtasks=[],
+                next_subtask="Turn off the water tap.",
+                confidence=0.95,
+                evidence="tap is off",
+                memory_update="tap is off",
+                state_summary="tap is off",
+            )
+
+        def build_context(self) -> dict[str, str]:
+            return {
+                "ordered_task_spec_text": self.task_spec.as_prompt_text(),
+                "working_memory_text": "Task progress: 0/2 (0%)",
+                "stage_estimate_text": '{"current_subtask":"Turn on the water tap."}',
+            }
+
+    replanner = ReplayManipulationPromptPlanner(
+        FakeReplayEnvironment(),
+        PlannerConfig(base_url="http://unused", model="test"),
+        task_memory_runtime=FakeTaskMemoryRuntime(),
+    )
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content='{"action":"complete","reason":"turn on is done"}',
+                    reasoning=None,
+                )
+            )
+        ]
+    )
+    monkeypatch.setattr(replanner.client.chat.completions, "create", lambda **_kwargs: response)
+
+    decision = replanner.plan(
+        task_prompt="turn off the water tap",
+        current_policy_prompt="turn off the water tap",
+        executed_policy_steps=16,
+        prompt_history=[],
+    )
+
+    assert decision.action == "continue"
+    assert decision.prompt == "turn off the water tap"
+    assert "ordered stage did not confirm" in decision.reason
+
+
 def test_replay_ordered_task_memory_runtime_caches_current_step(monkeypatch):
     from examples.piper_real.planner_config import PlannerConfig
     from examples.piper_real.replay_task_memory import ReplayOrderedTaskMemoryRuntime

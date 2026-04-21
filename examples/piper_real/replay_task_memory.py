@@ -22,7 +22,9 @@ def _compact_text(text: str | None) -> str:
 
 
 def _normalize_label(label: str | None) -> str:
-    return _compact_text(label).casefold()
+    text = _compact_text(label).casefold()
+    text = re.sub(r"[^\w\s]+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _round_values(values: Any, digits: int = 4) -> list[float] | None:
@@ -613,7 +615,12 @@ def build_user_prompt(
 
 
 class ReplayOrderedTaskMemoryRuntime:
-    """Ordered task-stage analysis runtime for replay hybrid planning."""
+    """Ordered task-stage analysis runtime for replay hybrid planning.
+
+    Works with any environment that exposes ``get_image(cam, idx)``, ``get_cursor()``,
+    ``num_steps``, and ``camera_names`` — including ``PiperRealEnvironment`` on the
+    real robot (duck-typed, not limited to offline replay).
+    """
 
     def __init__(
         self,

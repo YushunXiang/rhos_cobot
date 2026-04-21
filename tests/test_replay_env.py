@@ -545,7 +545,7 @@ class TestMainReplayIntegration:
         assert [call["executed_policy_steps"] for call in recorded["replan_calls"]] == [0, 2]
         assert recorded["closed"] is True
 
-    def test_run_replay_manipulation_subtask_exports_debug_on_cap(self, tmp_path):
+    def test_run_manipulation_subtask_exports_debug_on_cap(self, tmp_path):
         from examples.piper_real import main as main_module
         from examples.piper_real import replay_manipulation_planner as replay_manipulation_planner_mod
 
@@ -618,7 +618,7 @@ class TestMainReplayIntegration:
                 )
 
         env = FakeReplayEnvironment()
-        result = main_module._run_replay_manipulation_subtask(
+        result = main_module._run_manipulation_subtask(
             env,
             FakePolicyAgent(),
             FakeManipulationPromptPlanner(),
@@ -711,7 +711,7 @@ class TestMainReplayIntegration:
         monkeypatch.setattr(main_module, "_create_policy_agent", lambda _args: object())
         monkeypatch.setattr(
             main_module,
-            "_run_replay_manipulation_subtask",
+            "_run_manipulation_subtask",
             lambda *_args, **_kwargs: {
                 "executed_steps": 200,
                 "prompt_queries": 13,
