@@ -1271,6 +1271,9 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
     (``ReplayOrderedTaskMemoryRuntime``).
     """
 
+    import einops
+    from openpi_client import image_tools
+
     from examples.piper_real import base_safety as _base_safety
     from examples.piper_real import env as _env
     from examples.piper_real import logger as _logger
@@ -1411,6 +1414,37 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
     prompt_queries = 0
     navigation_only_ran = False
 
+    def _dump_nav_frame() -> None:
+        if environment is None or not getattr(environment, "save_obs", False):
+            return
+        ros_op = environment.ros_operator
+        if not (
+            ros_op.img_front_deque
+            and ros_op.img_left_deque
+            and ros_op.img_right_deque
+        ):
+            return
+        bridge = ros_op.bridge
+        front = bridge.imgmsg_to_cv2(ros_op.img_front_deque[-1], "rgb8")
+        left = bridge.imgmsg_to_cv2(ros_op.img_left_deque[-1], "rgb8")
+        right = bridge.imgmsg_to_cv2(ros_op.img_right_deque[-1], "rgb8")
+
+        def _to_chw_224(arr):
+            resized = image_tools.convert_to_uint8(
+                image_tools.resize_with_pad(arr, 224, 224)
+            )
+            return einops.rearrange(resized, "h w c -> c h w")
+
+        images = {
+            "cam_high": _to_chw_224(front),
+            "cam_left_wrist": _to_chw_224(left),
+            "cam_right_wrist": _to_chw_224(right),
+        }
+        environment.frame_cnt += 1
+        environment.saver.save_images_to_folder(
+            images, frame_id=environment.frame_cnt
+        )
+
     try:
         for idx, subtask in enumerate(subtask_list):
             logging.info(
@@ -1436,6 +1470,7 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
                     subtask.prompt,
                     ros_operator,
                     dry_run=not args.use_robot_base,
+                    frame_tick_callback=_dump_nav_frame,
                 )
                 if not result.ok:
                     logging.error(
@@ -1516,12 +1551,23 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
             prompt_queries=prompt_queries,
         )
     finally:
+        save_dir_for_stitch = None
         if environment is not None:
             if args.use_robot_base:
                 _base_safety.stop_base(environment.ros_operator)
+            if getattr(environment, "saver", None) is not None:
+                save_dir_for_stitch = environment.saver.save_dir
             close = getattr(environment, "close", None)
             if callable(close):
                 close()
+        if save_dir_for_stitch is not None:
+            try:
+                logging.info(
+                    "Stitching camera videos in %s ...", save_dir_for_stitch
+                )
+                _logger.stitch_camera_videos(save_dir_for_stitch)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("stitch_camera_videos failed: %s", exc)
 
 
 def main(args: Args) -> None:

@@ -4,7 +4,10 @@ import rospy
 from sensor_msgs.msg import JointState
 from sensor_msgs.msg import Image
 import csv
+import logging
 import os
+import shutil
+import subprocess
 from datetime import datetime
 import cv2
 import pandas as pd
@@ -258,6 +261,86 @@ class ModelInputObservationSaver:
             img.save(img_path)
 
 
+
+
+def stitch_camera_videos(
+    save_dir: str,
+    fps: float = 25.0,
+    cam_names: tuple = ("cam_left_wrist", "cam_high", "cam_right_wrist"),
+) -> None:
+    """Stitch per-cam PNG sequences under ``save_dir/images`` into per-cam MP4s,
+    then hstack them into a combined 3-view MP4. No-ops on missing ffmpeg or
+    missing frames. Never raises.
+    """
+    images_dir = os.path.join(save_dir, "images")
+    if not os.path.isdir(images_dir):
+        logging.warning("stitch_camera_videos: images dir not found: %s", images_dir)
+        return
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        logging.warning("stitch_camera_videos: ffmpeg not found on PATH; skipping")
+        return
+
+    per_cam_mp4s = {}
+    for cam in cam_names:
+        first_frame = os.path.join(images_dir, f"{cam}_1.png")
+        if not os.path.isfile(first_frame):
+            logging.warning(
+                "stitch_camera_videos: no frames for %s (missing %s); skipping",
+                cam,
+                first_frame,
+            )
+            continue
+        out_mp4 = os.path.join(save_dir, f"{cam}.mp4")
+        cmd = [
+            ffmpeg, "-y",
+            "-framerate", str(fps),
+            "-start_number", "1",
+            "-i", os.path.join(images_dir, f"{cam}_%d.png"),
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-r", str(fps),
+            out_mp4,
+        ]
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            logging.warning(
+                "stitch_camera_videos: ffmpeg failed for %s: %s",
+                cam,
+                result.stderr.strip().splitlines()[-1] if result.stderr else "<no stderr>",
+            )
+            continue
+        per_cam_mp4s[cam] = out_mp4
+        logging.info("stitch_camera_videos: wrote %s", out_mp4)
+
+    if len(per_cam_mp4s) != len(cam_names):
+        logging.warning(
+            "stitch_camera_videos: only %d/%d per-cam videos produced; skipping hstack",
+            len(per_cam_mp4s),
+            len(cam_names),
+        )
+        return
+
+    combined = os.path.join(save_dir, "combined.mp4")
+    hstack_cmd = [ffmpeg, "-y"]
+    for cam in cam_names:
+        hstack_cmd += ["-i", per_cam_mp4s[cam]]
+    hstack_cmd += [
+        "-filter_complex",
+        f"[0:v][1:v][2:v]hstack=inputs={len(cam_names)}",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        combined,
+    ]
+    result = subprocess.run(hstack_cmd, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        logging.warning(
+            "stitch_camera_videos: ffmpeg hstack failed: %s",
+            result.stderr.strip().splitlines()[-1] if result.stderr else "<no stderr>",
+        )
+        return
+    logging.info("stitch_camera_videos: wrote combined 3-view video %s", combined)
 
 
 # main:设置参数，根据参数选择需要记录的logger,并启动logger,参数包括 input,output,img,all

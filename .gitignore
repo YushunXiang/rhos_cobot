@@ -129,3 +129,4 @@ dmypy.json
 config/servers.toml
 !config/servers.example.toml
 /outputs
+.env

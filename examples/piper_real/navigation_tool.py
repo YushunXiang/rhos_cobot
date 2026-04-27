@@ -331,6 +331,8 @@ def navigate_to_goal(
     ros_operator: Any | None,
     goal: NavigationGoal,
     config: NavigationConfig,
+    *,
+    frame_tick_callback: Callable[[], None] | None = None,
 ) -> CoordinateNavigationResult:
     """Drive the base toward a single goal pose using feedback control."""
 
@@ -375,6 +377,12 @@ def navigate_to_goal(
             current_pose = ros_operator.latest_odometry()
             if current_pose is None:
                 raise RuntimeError("odometry unavailable")
+
+            if frame_tick_callback is not None:
+                try:
+                    frame_tick_callback()
+                except Exception as exc:  # noqa: BLE001
+                    logging.warning("navigation frame dump failed: %s", exc)
 
             linear_x, angular_z, telemetry, reached = _compute_command(
                 current_pose, goal, config
@@ -455,6 +463,7 @@ def navigate(
     routine_name: str = DEFAULT_ROUTINE_NAME,
     config: NavigationConfig | None = None,
     inter_step_sleep_s: float = INTER_STEP_SLEEP_S,
+    frame_tick_callback: Callable[[], None] | None = None,
 ) -> NavigationResult:
     """Run the fixed goal routine against ``ros_operator``.
 
@@ -529,7 +538,12 @@ def navigate(
                 _goal_summary(offset),
                 _goal_summary(absolute_goal),
             )
-            result = navigate_to_goal(adapted, absolute_goal, cfg)
+            result = navigate_to_goal(
+                adapted,
+                absolute_goal,
+                cfg,
+                frame_tick_callback=frame_tick_callback,
+            )
             if not result.ok:
                 base_safety.stop_base(ros_operator)
                 return NavigationResult(
