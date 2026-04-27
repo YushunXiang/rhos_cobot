@@ -128,5 +128,7 @@ dmypy.json
 # Local deployment config
 config/servers.toml
 !config/servers.example.toml
+config/server_state.json
+!config/server_state.example.json
 /outputs
 .env
