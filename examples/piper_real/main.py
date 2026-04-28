@@ -538,6 +538,23 @@ def _run_manipulation_subtask(
         stall_steps=progress_stall_steps,
         regression_threshold=progress_regression_threshold,
     )
+    visual_completion_detector = None
+    try:
+        from examples.piper_real.visual_completion_detector import (
+            SandwichVisualCompletionDetector,
+        )
+
+        candidate_detector = SandwichVisualCompletionDetector(subtask_prompt)
+        if candidate_detector.enabled:
+            visual_completion_detector = candidate_detector
+            logging.info(
+                "Visual completion detector enabled for manipulate subtask %s/%s: %s",
+                subtask_index if subtask_index is not None else "?",
+                total_subtasks if total_subtasks is not None else "?",
+                subtask_prompt,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Visual completion detector unavailable: %s", exc)
     logging.info(
         "Manipulate subtask %s/%s start: prompt=%s max_steps=%d "
         "replan_interval_steps=%d has_progress_head=%s",
@@ -641,6 +658,45 @@ def _run_manipulation_subtask(
                 )
                 aborted_by_user = True
                 break
+
+        if (
+            visual_completion_detector is not None
+            and executed_steps % replan_interval_steps == 0
+        ):
+            try:
+                visual_decision = visual_completion_detector.observe(environment)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning(
+                    "Visual completion detector failed after %d policy steps for %s: %s",
+                    executed_steps,
+                    subtask_prompt,
+                    exc,
+                )
+            else:
+                logging.info(
+                    "Visual completion detector at %d policy steps for %s: complete=%s reason=%s metrics=%s",
+                    executed_steps,
+                    subtask_prompt,
+                    visual_decision.complete,
+                    visual_decision.reason,
+                    json.dumps(visual_decision.metrics, sort_keys=True),
+                )
+                if visual_decision.complete:
+                    logging.info(
+                        "Visual completion detector marked subtask complete after %d policy steps: %s",
+                        executed_steps,
+                        visual_decision.reason,
+                    )
+                    return {
+                        "executed_steps": executed_steps,
+                        "prompt_queries": prompt_queries,
+                        "completed": True,
+                        "completed_by_replan": False,
+                        "completed_by_progress": False,
+                        "completed_by_visual": True,
+                        "last_policy_prompt": current_policy_prompt,
+                        "stop_reason": "visual_complete",
+                    }
 
         if has_progress_head and progress_value is not None:
             decision = progress_tracker.observe(float(progress_value))
