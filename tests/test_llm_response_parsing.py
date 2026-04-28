@@ -544,6 +544,83 @@ def test_replay_manipulation_planner_rejects_complete_before_stage_confirms_targ
     assert "ordered stage did not confirm" in decision.reason
 
 
+def test_replay_manipulation_planner_accepts_complete_when_stage_is_target(monkeypatch):
+    from examples.piper_real.planner_config import PlannerConfig
+    from examples.piper_real.replay_manipulation_planner import ReplayManipulationPromptPlanner
+    from examples.piper_real.replay_task_memory import OrderedTaskSpec
+    from examples.piper_real.replay_task_memory import TaskStageDecision
+
+    class FakeReplayEnvironment:
+        num_steps = 2
+        camera_names = ("cam_high",)
+
+        def get_cursor(self) -> int:
+            return 0
+
+        def get_image(self, _cam_name: str, _idx: int):
+            import numpy as np
+
+            return np.zeros((8, 8, 3), dtype=np.uint8)
+
+    class FakeTaskMemoryRuntime:
+        def __init__(self) -> None:
+            self.task_spec = OrderedTaskSpec(
+                name="sandwich",
+                total_task="make sandwich",
+                subtasks=[
+                    "Place the first slice of bread on the plate.",
+                    "Place the lettuce leaf on the first slice of bread.",
+                ],
+            )
+            self._last_decision = TaskStageDecision(
+                current_subtask="Place the first slice of bread on the plate.",
+                current_subtask_index=0,
+                completed_subtasks=[],
+                next_subtask="Place the lettuce leaf on the first slice of bread.",
+                confidence=1.0,
+                evidence="outer orchestrator is on the bread subtask",
+                memory_update="bread subtask active",
+                state_summary="bread subtask active",
+            )
+
+        def build_context(self) -> dict[str, str]:
+            return {
+                "ordered_task_spec_text": self.task_spec.as_prompt_text(),
+                "working_memory_text": "Task progress: 0/2 (0%)",
+                "stage_estimate_text": (
+                    '{"current_subtask":"Place the first slice of bread on the plate.",'
+                    '"current_subtask_index":0}'
+                ),
+            }
+
+    replanner = ReplayManipulationPromptPlanner(
+        FakeReplayEnvironment(),
+        PlannerConfig(base_url="http://unused", model="test"),
+        task_memory_runtime=FakeTaskMemoryRuntime(),
+    )
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content='{"action":"complete","reason":"bread is on the plate"}',
+                    reasoning=None,
+                )
+            )
+        ]
+    )
+    monkeypatch.setattr(replanner.client.chat.completions, "create", lambda **_kwargs: response)
+
+    decision = replanner.plan(
+        task_prompt="Place the first slice of bread on the plate.",
+        current_policy_prompt="Place the first slice of bread on the plate.",
+        executed_policy_steps=400,
+        prompt_history=[],
+    )
+
+    assert decision.action == "complete"
+    assert decision.reason == "bread is on the plate"
+
+
 def test_replay_ordered_task_memory_runtime_caches_current_step(monkeypatch):
     from examples.piper_real.planner_config import PlannerConfig
     from examples.piper_real.replay_task_memory import ReplayOrderedTaskMemoryRuntime
@@ -621,3 +698,42 @@ def test_replay_ordered_task_memory_runtime_caches_current_step(monkeypatch):
     assert recorded["calls"] == 1
     assert len(runtime.memory.entries) == 1
     assert "Working Memory" in context["working_memory_text"]
+
+
+def test_replay_ordered_task_memory_runtime_mark_completed_through(monkeypatch):
+    from examples.piper_real.planner_config import PlannerConfig
+    from examples.piper_real.replay_task_memory import ReplayOrderedTaskMemoryRuntime
+
+    class FakeReplayEnvironment:
+        num_steps = 10
+        camera_names = ("cam_high",)
+
+        def get_cursor(self) -> int:
+            return 4
+
+    task_spec_path = Path(__file__).resolve().parents[1] / "config" / "deploy.json"
+    runtime = ReplayOrderedTaskMemoryRuntime(
+        FakeReplayEnvironment(),
+        PlannerConfig(
+            base_url="http://unused",
+            model="test",
+            task_spec_path=str(task_spec_path),
+            task_memory_max_entries=4,
+        ),
+    )
+
+    def _unexpected_create(**_kwargs):
+        raise AssertionError("authoritative memory state should be cached")
+
+    monkeypatch.setattr(runtime.client.chat.completions, "create", _unexpected_create)
+
+    decision = runtime.mark_completed_through(3, reason="bread placed")
+    cached = runtime.observe()
+    context = runtime.build_context()
+
+    assert decision.current_subtask == "Place the lettuce leaf on the first slice of bread."
+    assert decision.current_subtask_index == 4
+    assert decision.completed_subtasks == runtime.task_spec.subtasks[:4]
+    assert decision.next_subtask == "Place the second slice of bread on the lettuce leaf."
+    assert cached is decision
+    assert "4/6" in context["working_memory_text"]

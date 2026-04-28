@@ -233,6 +233,41 @@ def _build_ordered_task_memory_runtime(args: Args, environment):
     return runtime
 
 
+def _mark_ordered_task_completed(
+    ordered_task_memory_runtime,
+    subtask_index: int,
+    *,
+    reason: str,
+) -> None:
+    if ordered_task_memory_runtime is None:
+        return
+    marker = getattr(ordered_task_memory_runtime, "mark_completed_through", None)
+    if not callable(marker):
+        return
+    try:
+        marker(subtask_index, reason=reason)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(
+            "Could not advance ordered task memory after %s: %s",
+            reason,
+            exc,
+        )
+
+
+def _refresh_environment_observation_cache(environment, *, context: str) -> None:
+    refresher = getattr(environment, "refresh_observation_cache", None)
+    if not callable(refresher):
+        return
+    try:
+        refresher()
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(
+            "Could not refresh observation cache before %s; continuing with cached frame: %s",
+            context,
+            exc,
+        )
+
+
 def _build_replay_subtask_list(args: Args, prompt: str, ordered_task_memory_runtime=None):
     from examples.piper_real import task_decomposer as _task_decomposer
 
@@ -1146,6 +1181,11 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                     len(subtask_list),
                     subtask.prompt,
                 )
+                _mark_ordered_task_completed(
+                    ordered_task_memory_runtime,
+                    idx,
+                    reason=f"replay navigate subtask {idx + 1} skipped/succeeded",
+                )
                 continue
 
             if args.navigation_only:
@@ -1189,6 +1229,11 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                     int(manipulation_result["prompt_queries"]),
                     environment.get_cursor(),
                     environment.num_steps,
+                )
+                _mark_ordered_task_completed(
+                    ordered_task_memory_runtime,
+                    idx,
+                    reason=f"replay manipulate subtask {idx + 1} completed",
                 )
             else:
                 stop_reason = str(manipulation_result.get("stop_reason", "incomplete"))
@@ -1389,6 +1434,7 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
 
     # Step 6: Build ordered task memory + manipulation replanner (manipulate only).
     manipulation_planner = None
+    ordered_task_memory_runtime = None
     if needs_server and environment is not None:
         ordered_task_memory_runtime = _build_ordered_task_memory_runtime(
             args,
@@ -1488,6 +1534,11 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
                     len(subtask_list),
                     result.routine_name,
                 )
+                _mark_ordered_task_completed(
+                    ordered_task_memory_runtime,
+                    idx,
+                    reason=f"navigate subtask {idx + 1} succeeded",
+                )
                 continue
 
             if args.navigation_only:
@@ -1500,6 +1551,10 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
             ), "manipulate subtask requires pi0 policy agent + manipulation planner + env"
 
             environment.set_prompt(subtask.prompt)
+            _refresh_environment_observation_cache(
+                environment,
+                context=f"manipulate subtask {idx + 1}/{len(subtask_list)}",
+            )
             manipulation_result = _run_manipulation_subtask(
                 environment,
                 policy_agent,
@@ -1529,6 +1584,11 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
                     len(subtask_list),
                     executed_steps,
                     int(manipulation_result["prompt_queries"]),
+                )
+                _mark_ordered_task_completed(
+                    ordered_task_memory_runtime,
+                    idx,
+                    reason=f"manipulate subtask {idx + 1} completed",
                 )
             else:
                 stop_reason = str(manipulation_result.get("stop_reason", "incomplete"))

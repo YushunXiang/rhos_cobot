@@ -641,6 +641,64 @@ class ReplayOrderedTaskMemoryRuntime:
         self._last_step_index: int | None = None
         self._last_decision: TaskStageDecision | None = None
 
+    def mark_completed_through(self, subtask_index: int, *, reason: str = "") -> TaskStageDecision:
+        """Advance ordered memory from the outer orchestrator's authoritative state."""
+        completed_count = max(
+            0,
+            min(int(subtask_index) + 1, self.task_spec.done_index),
+        )
+        if completed_count >= self.task_spec.done_index:
+            current_index = self.task_spec.done_index
+            current_subtask = self.task_spec.done_label
+            next_subtask = self.task_spec.done_label
+            completed_subtasks = list(self.task_spec.subtasks)
+        else:
+            current_index = completed_count
+            current_subtask = self.task_spec.label_from_index(current_index)
+            next_subtask = self.task_spec.next_after_current(current_index)
+            completed_subtasks = self.task_spec.prefix(completed_count)
+
+        step_index = self._current_frame_index()
+        reason_text = _compact_text(reason) or "outer orchestrator reported success"
+        decision = TaskStageDecision(
+            current_subtask=current_subtask,
+            current_subtask_index=current_index,
+            completed_subtasks=completed_subtasks,
+            next_subtask=next_subtask,
+            confidence=1.0,
+            evidence=(
+                f"Authoritative outer orchestrator state: completed through "
+                f"ordered subtask {completed_count}/{self.task_spec.done_index}."
+            ),
+            memory_update=reason_text,
+            state_summary=(
+                f"Outer orchestrator advanced ordered task memory after {reason_text}."
+            ),
+            sequence_enforced=False,
+        )
+        self.memory.add(
+            TaskMemoryEntry(
+                step_index=step_index,
+                current_subtask=decision.current_subtask,
+                current_subtask_index=decision.current_subtask_index,
+                completed_subtasks=list(decision.completed_subtasks),
+                next_subtask=decision.next_subtask,
+                confidence=decision.confidence,
+                evidence=decision.evidence,
+                memory_update=decision.memory_update,
+                state_summary=decision.state_summary,
+            )
+        )
+        self._last_step_index = step_index
+        self._last_decision = decision
+        logging.info(
+            "Ordered task memory advanced by outer orchestrator through subtask %d/%d: %s",
+            completed_count,
+            self.task_spec.done_index,
+            json.dumps(decision.as_json_dict(), ensure_ascii=False),
+        )
+        return decision
+
     def build_context(self) -> dict[str, str]:
         decision = self.observe()
         return {

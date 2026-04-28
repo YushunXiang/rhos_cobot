@@ -36,6 +36,11 @@ def _install_live_main_fakes(monkeypatch, recorded, *, planner_run_routine_resul
         def set_prompt(self, prompt):
             recorded.setdefault("manipulate_prompts", []).append(prompt)
 
+        def refresh_observation_cache(self):
+            recorded["refresh_observation_cache_calls"] = (
+                recorded.get("refresh_observation_cache_calls", 0) + 1
+            )
+
         def close(self):
             recorded["environment_close_calls"] = recorded.get("environment_close_calls", 0) + 1
 
@@ -128,7 +133,7 @@ def test_main_calls_navigation_tool_before_manipulation(monkeypatch):
         def run(self):
             recorded["runtime_runs"] += 1
 
-    def fake_navigate(prompt, ros_operator, *, dry_run=False):
+    def fake_navigate(prompt, ros_operator, *, dry_run=False, frame_tick_callback=None):
         recorded.setdefault("navigate_calls", []).append((prompt, ros_operator, dry_run))
         return navigation_tool_mod.NavigationResult(
             ok=True,
@@ -162,8 +167,18 @@ def test_main_calls_navigation_tool_before_manipulation(monkeypatch):
         recorded.setdefault("manipulation_calls", []).append(subtask_prompt)
         return {"executed_steps": 3, "prompt_queries": 1, "completed": True}
 
+    class FakeOrderedTaskMemory:
+        def mark_completed_through(self, subtask_index, *, reason):
+            recorded.setdefault("ordered_memory_marks", []).append(
+                (subtask_index, reason)
+            )
+
     monkeypatch.setattr(main_module, "_create_policy_agent", lambda _args: FakePolicyAgent())
-    monkeypatch.setattr(main_module, "_build_ordered_task_memory_runtime", lambda *_args: None)
+    monkeypatch.setattr(
+        main_module,
+        "_build_ordered_task_memory_runtime",
+        lambda *_args: FakeOrderedTaskMemory(),
+    )
     monkeypatch.setattr(main_module, "_run_manipulation_subtask", fake_run_manipulation_subtask)
     monkeypatch.setattr(main_module, "_run_required_server_checks", lambda *args, **kwargs: True)
     monkeypatch.setattr(base_safety_mod, "confirm_base_motion_safety", lambda *args, **kwargs: True)
@@ -195,6 +210,11 @@ def test_main_calls_navigation_tool_before_manipulation(monkeypatch):
     assert recorded["navigate_calls"][0][2] is False
     assert recorded["manipulate_prompts"] == ["pick cup"]
     assert recorded["manipulation_calls"] == ["pick cup"]
+    assert recorded["refresh_observation_cache_calls"] == 1
+    assert recorded["ordered_memory_marks"] == [
+        (0, "navigate subtask 1 succeeded"),
+        (1, "manipulate subtask 2 completed"),
+    ]
     assert recorded["events"] == ["environment_reset", "agent_reset", "manipulate"]
     assert recorded["stop_calls"] == 1
     assert recorded["environment_close_calls"] == 1
@@ -269,17 +289,18 @@ def test_main_aborts_manipulation_when_navigation_tool_fails(monkeypatch):
         "stop_base",
         lambda _ros_operator: recorded.__setitem__("stop_calls", recorded["stop_calls"] + 1),
     )
-    monkeypatch.setattr(
-        navigation_tool_mod,
-        "navigate",
-        lambda prompt, ros_operator, *, dry_run=False: navigation_tool_mod.NavigationResult(
+    def fake_failed_navigate(
+        prompt, ros_operator, *, dry_run=False, frame_tick_callback=None
+    ):
+        return navigation_tool_mod.NavigationResult(
             ok=False,
             prompt=prompt,
             routine_name="default_demo",
             executed_steps=1,
             error="boom",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(navigation_tool_mod, "navigate", fake_failed_navigate)
 
     args = main_module.Args(
         use_llm_planner=True,
@@ -319,7 +340,7 @@ def test_main_navigation_only_uses_dry_run_without_runtime(monkeypatch):
                 task_decomposer_mod.Subtask(type="manipulate", prompt="pick cup"),
             ]
 
-    def fake_navigate(prompt, ros_operator, *, dry_run=False):
+    def fake_navigate(prompt, ros_operator, *, dry_run=False, frame_tick_callback=None):
         recorded["navigate_call"] = (prompt, ros_operator, dry_run)
         return navigation_tool_mod.NavigationResult(
             ok=True,
@@ -365,7 +386,7 @@ def test_main_navigation_only_runs_navigation_once(monkeypatch):
                 task_decomposer_mod.Subtask(type="manipulate", prompt="pick cup"),
             ]
 
-    def fake_navigate(prompt, ros_operator, *, dry_run=False):
+    def fake_navigate(prompt, ros_operator, *, dry_run=False, frame_tick_callback=None):
         recorded["navigate_calls"].append((prompt, ros_operator, dry_run))
         return navigation_tool_mod.NavigationResult(
             ok=True,

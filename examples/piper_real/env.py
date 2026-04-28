@@ -1,5 +1,6 @@
 
 import sys
+from types import SimpleNamespace
 from typing import List, Optional  # noqa: UP035
 
 import einops
@@ -111,6 +112,11 @@ class PiperRealEnvironment(_environment.Environment):
             for cam_name, image in images.items()
             if "_depth" not in cam_name
         }
+
+    def refresh_observation_cache(self) -> None:
+        """Refresh cached camera frames without publishing a robot action."""
+        self._ts = SimpleNamespace(observation=self._env.get_observation())
+        self._cache_raw_images_from_timestep()
 
     @override
     def reset(self) -> None:

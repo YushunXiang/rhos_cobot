@@ -486,8 +486,8 @@ class TestMainReplayIntegration:
                 return {"actions": np.zeros(14, dtype=np.float32)}
 
         class FakeManipulationPromptPlanner:
-            def __init__(self, _environment, _config) -> None:
-                pass
+            def __init__(self, _environment, _config, task_memory_runtime=None) -> None:
+                recorded["manipulation_task_memory_runtime"] = task_memory_runtime
 
             def plan(
                 self,
@@ -516,6 +516,15 @@ class TestMainReplayIntegration:
                     reason="plate is secured",
                 )
 
+        class FakeOrderedTaskMemory:
+            def build_context(self):
+                return {}
+
+            def mark_completed_through(self, subtask_index, *, reason):
+                recorded.setdefault("ordered_memory_marks", []).append(
+                    (subtask_index, reason)
+                )
+
         monkeypatch.setattr(replay_env_mod, "ReplayEnvironment", FakeReplayEnvironment)
         monkeypatch.setattr(task_decomposer_mod, "TaskDecomposer", FakeTaskDecomposer)
         monkeypatch.setattr(
@@ -524,6 +533,11 @@ class TestMainReplayIntegration:
             FakeManipulationPromptPlanner,
         )
         monkeypatch.setattr(main_module, "_create_policy_agent", lambda _args: FakePolicyAgent())
+        monkeypatch.setattr(
+            main_module,
+            "_build_ordered_task_memory_runtime",
+            lambda *_args: FakeOrderedTaskMemory(),
+        )
 
         args = main_module.Args(
             replay_dataset="/tmp/episode_4.hdf5",
@@ -543,6 +557,12 @@ class TestMainReplayIntegration:
         # Manipulate runs directly from cursor 0 since navigate subtasks no longer advance it.
         assert recorded["policy_obs_steps"] == [0, 1]
         assert [call["executed_policy_steps"] for call in recorded["replan_calls"]] == [0, 2]
+        assert recorded["manipulation_task_memory_runtime"] is not None
+        assert recorded["ordered_memory_marks"] == [
+            (0, "replay navigate subtask 1 skipped/succeeded"),
+            (1, "replay manipulate subtask 2 completed"),
+            (2, "replay navigate subtask 3 skipped/succeeded"),
+        ]
         assert recorded["closed"] is True
 
     def test_run_manipulation_subtask_exports_debug_on_cap(self, tmp_path):

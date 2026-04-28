@@ -230,9 +230,9 @@ class ReplayManipulationPromptPlanner:
         except Exception:  # noqa: BLE001
             return False
 
-        if completed_count > target_index:
+        if completed_count >= target_index:
             return True
-        if current_index > target_index:
+        if current_index >= target_index:
             return True
         return current_index >= task_spec.done_index
 
