@@ -130,5 +130,9 @@ config/servers.toml
 !config/servers.example.toml
 config/server_state.json
 !config/server_state.example.json
+config/vllm_server_state.json
+!config/vllm_server_state.example.json
+config/pi0_server_state.json
+!config/pi0_server_state.example.json
 /outputs
 .env
