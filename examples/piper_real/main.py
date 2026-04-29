@@ -871,6 +871,35 @@ def _log_hybrid_replay_summary(
         _log_replay_summary(environment, policy_steps)
 
 
+def _get_replay_ordered_completed_count(
+    ordered_task_memory_runtime,
+    *,
+    explicit_completed_count: int,
+) -> int:
+    task_spec = ordered_task_memory_runtime.task_spec
+    completed_count = max(
+        int(explicit_completed_count),
+        ordered_task_memory_runtime.memory.highest_completed_count(task_spec),
+    )
+    try:
+        decision = ordered_task_memory_runtime.observe()
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(
+            "Replay hybrid could not refresh ordered task progress; "
+            "falling back to explicit completed count: %s",
+            exc,
+        )
+        return min(completed_count, task_spec.done_index)
+
+    completed_count = max(
+        completed_count,
+        len(task_spec.normalize_completed_prefix(decision.completed_subtasks)),
+    )
+    if decision.current_subtask == task_spec.done_label:
+        return task_spec.done_index
+    return min(completed_count, task_spec.done_index)
+
+
 def _get_visualizer_step(environment) -> int:
     if environment.num_steps <= 0:
         return 0
@@ -1148,19 +1177,6 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
         args,
         environment,
     )
-    subtask_list = _build_replay_subtask_list(
-        args,
-        prompt,
-        ordered_task_memory_runtime=ordered_task_memory_runtime,
-    )
-    if subtask_list is None:
-        logging.error(
-            "Replay hybrid exiting before execution at replay step %d/%d: subtask decomposition failed.",
-            environment.get_cursor(),
-            environment.num_steps,
-        )
-        environment.close()
-        return
 
     visualizer = _replay_visualizer.ReplayVisualizer(
         environment,
@@ -1199,7 +1215,10 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
     debug_export_dir = _resolve_replay_debug_export_dir(args)
 
     def _log_hybrid_early_exit(
-        reason: str, *, subtask_index: int | None = None
+        reason: str,
+        *,
+        subtask_index: int | None = None,
+        total_subtasks: int | None = None,
     ) -> None:
         if subtask_index is None:
             logging.error(
@@ -1215,139 +1234,319 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
             environment.get_cursor(),
             environment.num_steps,
             subtask_index + 1,
-            len(subtask_list),
+            total_subtasks or 0,
             reason,
         )
 
-    try:
-        for idx, subtask in enumerate(subtask_list):
+    def _execute_hybrid_subtask(
+        subtask,
+        *,
+        display_index: int,
+        display_total: int,
+    ) -> dict[str, object]:
+        nonlocal completed_manipulate
+        nonlocal completed_navigate
+        nonlocal policy_steps
+        nonlocal prompt_queries
+
+        logging.info(
+            "Executing replay subtask %d/%d [%s]: %s",
+            display_index,
+            display_total,
+            subtask.type,
+            subtask.prompt,
+        )
+        visualizer.set_subtask_context(
+            display_index, display_total, subtask.type, subtask.prompt
+        )
+
+        if subtask.type == "navigate":
+            if not on_nav_step(_get_visualizer_step(environment)):
+                _log_hybrid_early_exit(
+                    "user aborted before navigation replay skip",
+                    subtask_index=display_index - 1,
+                    total_subtasks=display_total,
+                )
+                logging.info(
+                    "Replay hybrid aborted by user before subtask %d/%d.",
+                    display_index,
+                    display_total,
+                )
+                return {"ok": False, "stop_reason": "user_abort"}
+            completed_navigate += 1
             logging.info(
-                "Executing replay subtask %d/%d [%s]: %s",
-                idx + 1,
-                len(subtask_list),
-                subtask.type,
+                "Skipping navigate subtask %d/%d in replay mode: %s",
+                display_index,
+                display_total,
                 subtask.prompt,
             )
-            visualizer.set_subtask_context(
-                idx + 1, len(subtask_list), subtask.type, subtask.prompt
+            return {
+                "ok": True,
+                "stop_reason": "",
+                "episode_complete": environment.is_episode_complete(),
+                "executed_steps": 0,
+            }
+
+        if args.navigation_only:
+            logging.info("Manipulate (skipped): %s", subtask.prompt)
+            return {
+                "ok": True,
+                "stop_reason": "",
+                "episode_complete": environment.is_episode_complete(),
+                "executed_steps": 0,
+            }
+
+        assert (
+            policy_agent is not None
+        ), "hybrid manipulate subtask requires a policy agent"
+        assert (
+            manipulation_planner is not None
+        ), "hybrid manipulate subtask requires a prompt replanner"
+        manipulation_result = _run_manipulation_subtask(
+            environment,
+            policy_agent,
+            manipulation_planner,
+            subtask_prompt=subtask.prompt,
+            max_steps=args.replay_manipulate_max_steps,
+            replan_interval_steps=args.replay_manipulate_replan_interval_steps,
+            progress_complete_threshold=args.planner.progress_complete_threshold,
+            progress_stall_threshold=args.planner.progress_stall_threshold,
+            progress_stall_steps=args.planner.progress_stall_steps,
+            progress_regression_threshold=args.planner.progress_regression_threshold,
+            progress_confirm_with_replanner=args.planner.progress_confirm_with_replanner,
+            progress_head_mode=args.progress_head_mode,
+            debug_export_dir=debug_export_dir,
+            subtask_index=display_index,
+            total_subtasks=display_total,
+            visualizer=visualizer,
+        )
+        executed_steps = int(manipulation_result["executed_steps"])
+        policy_steps += executed_steps
+        prompt_queries += int(manipulation_result["prompt_queries"])
+        if bool(manipulation_result.get("completed", False)):
+            completed_manipulate += 1
+            logging.info(
+                "Replay manipulate subtask %d/%d completed after %d policy steps, "
+                "%d prompt queries, at replay cursor %d/%d.",
+                display_index,
+                display_total,
+                executed_steps,
+                int(manipulation_result["prompt_queries"]),
+                environment.get_cursor(),
+                environment.num_steps,
             )
+            return {
+                "ok": True,
+                "stop_reason": "",
+                "episode_complete": environment.is_episode_complete(),
+                "executed_steps": executed_steps,
+            }
 
-            if subtask.type == "navigate":
-                if not on_nav_step(_get_visualizer_step(environment)):
-                    _log_hybrid_early_exit(
-                        "user aborted before navigation execution",
-                        subtask_index=idx,
-                    )
-                    logging.info(
-                        "Replay hybrid aborted by user before subtask %d/%d.",
-                        idx + 1,
-                        len(subtask_list),
-                    )
-                    return
-                completed_navigate += 1
-                logging.info(
-                    "Skipping navigate subtask %d/%d in replay mode: %s",
-                    idx + 1,
-                    len(subtask_list),
-                    subtask.prompt,
-                )
-                _mark_ordered_task_completed(
-                    ordered_task_memory_runtime,
-                    idx,
-                    reason=f"replay navigate subtask {idx + 1} skipped/succeeded",
-                )
-                continue
-
-            if args.navigation_only:
-                logging.info("Manipulate (skipped): %s", subtask.prompt)
-                continue
-
-            assert (
-                policy_agent is not None
-            ), "hybrid manipulate subtask requires a policy agent"
-            assert (
-                manipulation_planner is not None
-            ), "hybrid manipulate subtask requires a prompt replanner"
-            manipulation_result = _run_manipulation_subtask(
-                environment,
-                policy_agent,
-                manipulation_planner,
-                subtask_prompt=subtask.prompt,
-                max_steps=args.replay_manipulate_max_steps,
-                replan_interval_steps=args.replay_manipulate_replan_interval_steps,
-                progress_complete_threshold=args.planner.progress_complete_threshold,
-                progress_stall_threshold=args.planner.progress_stall_threshold,
-                progress_stall_steps=args.planner.progress_stall_steps,
-                progress_regression_threshold=args.planner.progress_regression_threshold,
-                progress_confirm_with_replanner=args.planner.progress_confirm_with_replanner,
-                progress_head_mode=args.progress_head_mode,
-                debug_export_dir=debug_export_dir,
-                subtask_index=idx + 1,
-                total_subtasks=len(subtask_list),
-                visualizer=visualizer,
+        stop_reason = str(manipulation_result.get("stop_reason", "incomplete"))
+        if stop_reason != "replay_exhausted":
+            _log_hybrid_early_exit(
+                f"manipulate subtask did not complete ({stop_reason})",
+                subtask_index=display_index - 1,
+                total_subtasks=display_total,
             )
-            executed_steps = int(manipulation_result["executed_steps"])
-            policy_steps += executed_steps
-            prompt_queries += int(manipulation_result["prompt_queries"])
-            if bool(manipulation_result.get("completed", False)):
-                completed_manipulate += 1
-                logging.info(
-                    "Replay manipulate subtask %d/%d completed after %d policy steps, "
-                    "%d prompt queries, at replay cursor %d/%d.",
-                    idx + 1,
-                    len(subtask_list),
-                    executed_steps,
-                    int(manipulation_result["prompt_queries"]),
-                    environment.get_cursor(),
-                    environment.num_steps,
-                )
-                _mark_ordered_task_completed(
-                    ordered_task_memory_runtime,
-                    idx,
-                    reason=f"replay manipulate subtask {idx + 1} completed",
-                )
-            else:
-                stop_reason = str(manipulation_result.get("stop_reason", "incomplete"))
-                if stop_reason == "replay_exhausted" and idx + 1 == len(subtask_list):
-                    logging.warning(
-                        "Replay dataset exhausted during final manipulate subtask %d/%d "
-                        "after %d policy steps with no explicit completion signal.",
-                        idx + 1,
-                        len(subtask_list),
-                        executed_steps,
-                    )
-                    break
-                _log_hybrid_early_exit(
-                    f"manipulate subtask did not complete ({stop_reason})",
-                    subtask_index=idx,
-                )
-                logging.error(
-                    "Replay manipulate subtask %d/%d did not complete after %d policy steps, "
-                    "%d prompt queries, at replay cursor %d/%d; stop_reason=%s",
-                    idx + 1,
-                    len(subtask_list),
-                    executed_steps,
-                    int(manipulation_result["prompt_queries"]),
-                    environment.get_cursor(),
-                    environment.num_steps,
-                    stop_reason,
-                )
-                return
-            if environment.is_episode_complete() and idx + 1 < len(subtask_list):
+            logging.error(
+                "Replay manipulate subtask %d/%d did not complete after %d policy steps, "
+                "%d prompt queries, at replay cursor %d/%d; stop_reason=%s",
+                display_index,
+                display_total,
+                executed_steps,
+                int(manipulation_result["prompt_queries"]),
+                environment.get_cursor(),
+                environment.num_steps,
+                stop_reason,
+            )
+            return {"ok": False, "stop_reason": stop_reason}
+
+        return {
+            "ok": True,
+            "stop_reason": stop_reason,
+            "episode_complete": True,
+            "executed_steps": executed_steps,
+        }
+
+    def _handle_replay_result(
+        result: dict[str, object],
+        *,
+        index: int,
+        total: int,
+        has_remaining_work: bool,
+        ordered: bool,
+    ) -> str:
+        if not bool(result["ok"]):
+            return "abort"
+        if result["stop_reason"] == "replay_exhausted":
+            if has_remaining_work:
                 _log_hybrid_early_exit(
                     "replay dataset exhausted with remaining subtasks",
-                    subtask_index=idx,
+                    subtask_index=index,
+                    total_subtasks=total,
                 )
                 logging.error(
                     "Replay dataset exhausted after subtask %d/%d; aborting remaining subtasks.",
-                    idx + 1,
-                    len(subtask_list),
+                    index + 1,
+                    total,
+                )
+                return "abort"
+            logging.warning(
+                "Replay dataset exhausted during final manipulate subtask %d/%d "
+                "after %d policy steps with no explicit completion signal.",
+                index + 1,
+                total,
+                int(result["executed_steps"]),
+            )
+            return "done" if ordered else "break"
+        if bool(result["episode_complete"]) and has_remaining_work:
+            _log_hybrid_early_exit(
+                "replay dataset exhausted with remaining subtasks",
+                subtask_index=index,
+                total_subtasks=total,
+            )
+            logging.error(
+                "Replay dataset exhausted after subtask %d/%d; aborting remaining subtasks.",
+                index + 1,
+                total,
+            )
+            return "abort"
+        return "continue"
+
+    try:
+        if ordered_task_memory_runtime is None or not hasattr(
+            ordered_task_memory_runtime, "task_spec"
+        ):
+            subtask_list = _build_replay_subtask_list(
+                args,
+                prompt,
+                ordered_task_memory_runtime=ordered_task_memory_runtime,
+            )
+            if subtask_list is None:
+                logging.error(
+                    "Replay hybrid exiting before execution at replay step %d/%d: "
+                    "subtask decomposition failed.",
+                    environment.get_cursor(),
+                    environment.num_steps,
                 )
                 return
 
+            summary_total_subtasks = len(subtask_list)
+            for idx, subtask in enumerate(subtask_list):
+                result = _execute_hybrid_subtask(
+                    subtask,
+                    display_index=idx + 1,
+                    display_total=len(subtask_list),
+                )
+                status = _handle_replay_result(
+                    result,
+                    index=idx,
+                    total=len(subtask_list),
+                    has_remaining_work=idx + 1 < len(subtask_list),
+                    ordered=False,
+                )
+                if status == "abort":
+                    return
+                if status == "break":
+                    break
+
+                if ordered_task_memory_runtime is not None:
+                    task_kind = "navigate" if subtask.type == "navigate" else "manipulate"
+                    completion = (
+                        "skipped/succeeded" if subtask.type == "navigate" else "completed"
+                    )
+                    _mark_ordered_task_completed(
+                        ordered_task_memory_runtime,
+                        idx,
+                        reason=f"replay {task_kind} subtask {idx + 1} {completion}",
+                    )
+        else:
+            task_spec = ordered_task_memory_runtime.task_spec
+            completed_ordered_count = _get_replay_ordered_completed_count(
+                ordered_task_memory_runtime,
+                explicit_completed_count=0,
+            )
+            summary_total_subtasks = task_spec.done_index
+            finished_on_final_replay_exhausted = False
+
+            while completed_ordered_count < task_spec.done_index:
+                ordered_prompt = task_spec.next_pending_label(completed_ordered_count)
+                logging.info(
+                    "Replay hybrid ordered planning batch %d/%d: %s",
+                    completed_ordered_count + 1,
+                    task_spec.done_index,
+                    ordered_prompt,
+                )
+                subtask_list = _build_replay_subtask_list(
+                    args,
+                    ordered_prompt,
+                    ordered_task_memory_runtime=ordered_task_memory_runtime,
+                )
+                if subtask_list is None:
+                    logging.error(
+                        "Replay hybrid exiting before ordered subtask %d/%d at replay step %d/%d: "
+                        "subtask decomposition failed.",
+                        completed_ordered_count + 1,
+                        task_spec.done_index,
+                        environment.get_cursor(),
+                        environment.num_steps,
+                    )
+                    return
+                if not subtask_list:
+                    logging.error(
+                        "Replay hybrid exiting before ordered subtask %d/%d at replay step %d/%d: "
+                        "decomposition returned no executable subtasks.",
+                        completed_ordered_count + 1,
+                        task_spec.done_index,
+                        environment.get_cursor(),
+                        environment.num_steps,
+                    )
+                    return
+
+                batch_completed = True
+                for batch_idx, subtask in enumerate(subtask_list):
+                    result = _execute_hybrid_subtask(
+                        subtask,
+                        display_index=completed_ordered_count + 1,
+                        display_total=task_spec.done_index,
+                    )
+                    status = _handle_replay_result(
+                        result,
+                        index=completed_ordered_count,
+                        total=task_spec.done_index,
+                        has_remaining_work=(
+                            batch_idx + 1 < len(subtask_list)
+                            or completed_ordered_count + 1 < task_spec.done_index
+                        ),
+                        ordered=True,
+                    )
+                    if status == "abort":
+                        return
+                    if status == "done":
+                        batch_completed = False
+                        finished_on_final_replay_exhausted = True
+                        break
+
+                if finished_on_final_replay_exhausted:
+                    break
+                if batch_completed:
+                    _mark_ordered_task_completed(
+                        ordered_task_memory_runtime,
+                        completed_ordered_count,
+                        reason=(
+                            "replay ordered subtask "
+                            f"{completed_ordered_count + 1} completed"
+                        ),
+                    )
+                    completed_ordered_count = _get_replay_ordered_completed_count(
+                        ordered_task_memory_runtime,
+                        explicit_completed_count=completed_ordered_count + 1,
+                    )
+
         _log_hybrid_replay_summary(
             environment,
-            total_subtasks=len(subtask_list),
+            total_subtasks=summary_total_subtasks,
             navigate_subtasks=completed_navigate,
             manipulate_subtasks=completed_manipulate,
             policy_steps=policy_steps,

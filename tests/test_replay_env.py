@@ -565,6 +565,192 @@ class TestMainReplayIntegration:
         ]
         assert recorded["closed"] is True
 
+    def test_run_replay_hybrid_replans_ordered_subtasks_until_task_spec_finishes(
+        self, monkeypatch
+    ):
+        from examples.piper_real import main as main_module
+        from examples.piper_real import replay_env as replay_env_mod
+        from examples.piper_real import replay_manipulation_planner as replay_manipulation_planner_mod
+        from examples.piper_real import replay_task_memory as replay_task_memory_mod
+        from examples.piper_real import replay_visualizer as replay_visualizer_mod
+        from examples.piper_real import task_decomposer as task_decomposer_mod
+        from examples.piper_real.planner_config import PlannerConfig
+
+        recorded: dict[str, object] = {}
+
+        ordered_subtasks = [
+            "Pick up the center plate",
+            "Turn on the faucet",
+            "Move from the sink area to the plate area",
+        ]
+
+        class FakeReplayEnvironment:
+            def __init__(self, dataset_path: str, prompt: str, max_steps: int | None = None) -> None:
+                recorded["dataset_path"] = dataset_path
+                recorded["prompt"] = prompt
+                recorded["max_steps"] = max_steps
+                self._cursor = 0
+                self.num_steps = 20
+                self.fps = 25.0
+                self.front_camera_name = "cam_high"
+                self.camera_names = ("cam_high",)
+                self.predicted_actions: list[np.ndarray] = []
+                self.predicted_action_steps: list[int] = []
+                self.ground_truth_actions = np.zeros((self.num_steps, 14), dtype=np.float32)
+                self.ground_truth_base_actions = None
+
+            def close(self) -> None:
+                recorded["closed"] = True
+
+            def get_cursor(self) -> int:
+                return self._cursor
+
+            def set_cursor(self, step_idx: int) -> None:
+                self._cursor = step_idx
+
+            def is_episode_complete(self) -> bool:
+                return False
+
+        class FakeMemory:
+            def highest_completed_count(self, _task_spec) -> int:
+                return 0
+
+        class FakeOrderedTaskMemoryRuntime:
+            def __init__(self) -> None:
+                self.task_spec = replay_task_memory_mod.OrderedTaskSpec(
+                    name="ordered_replay_test",
+                    total_task="Plate wash then move.",
+                    subtasks=list(ordered_subtasks),
+                    done_label="Task completed",
+                    uncertain_label="Unable to determine",
+                )
+                self.memory = FakeMemory()
+
+            def build_context(self) -> dict[str, str]:
+                return {
+                    "ordered_task_spec_text": self.task_spec.as_prompt_text(),
+                    "working_memory_text": "No prior working memory.",
+                    "stage_estimate_text": json.dumps(
+                        {
+                            "current_subtask": ordered_subtasks[0],
+                            "current_subtask_index": 0,
+                            "completed_subtasks": [],
+                            "next_subtask": ordered_subtasks[1],
+                        }
+                    ),
+                }
+
+            def observe(self, *, force_refresh: bool = False):
+                del force_refresh
+                return replay_task_memory_mod.TaskStageDecision(
+                    current_subtask=ordered_subtasks[0],
+                    current_subtask_index=0,
+                    completed_subtasks=[],
+                    next_subtask=ordered_subtasks[1],
+                    confidence=0.99,
+                    evidence="stale stage estimate",
+                    memory_update="",
+                    state_summary="",
+                    sequence_enforced=False,
+                )
+
+        class FakeTaskDecomposer:
+            def __init__(self, _config) -> None:
+                pass
+
+            def decompose(self, prompt: str, **_kwargs):
+                recorded.setdefault("decompose_prompts", []).append(prompt)
+                mapping = {
+                    ordered_subtasks[0]: [
+                        task_decomposer_mod.Subtask(type="manipulate", prompt=ordered_subtasks[0])
+                    ],
+                    ordered_subtasks[1]: [
+                        task_decomposer_mod.Subtask(type="manipulate", prompt=ordered_subtasks[1])
+                    ],
+                    ordered_subtasks[2]: [
+                        task_decomposer_mod.Subtask(type="navigate", prompt=ordered_subtasks[2])
+                    ],
+                }
+                return mapping[prompt]
+
+        class FakeReplayVisualizer:
+            def __init__(self, *_args, **_kwargs) -> None:
+                pass
+
+            def set_subtask_context(self, *_args, **_kwargs) -> None:
+                pass
+
+            def update(self, *_args, **_kwargs) -> bool:
+                return True
+
+            def close(self) -> None:
+                pass
+
+        class FakeReplayManipulationPromptPlanner:
+            def __init__(self, _environment, _config, task_memory_runtime=None) -> None:
+                self.task_memory_runtime = task_memory_runtime
+
+        def fake_run_manipulation_subtask(
+            environment,
+            _policy_agent,
+            _manipulation_planner,
+            *,
+            subtask_prompt: str,
+            **_kwargs,
+        ):
+            recorded.setdefault("manipulation_prompts", []).append(subtask_prompt)
+            environment.set_cursor(environment.get_cursor() + 1)
+            return {
+                "executed_steps": 1,
+                "prompt_queries": 1,
+                "completed": True,
+                "completed_by_replan": True,
+                "completed_by_progress": False,
+                "last_policy_prompt": subtask_prompt,
+                "stop_reason": "replanner_complete",
+            }
+
+        monkeypatch.setattr(replay_env_mod, "ReplayEnvironment", FakeReplayEnvironment)
+        monkeypatch.setattr(task_decomposer_mod, "TaskDecomposer", FakeTaskDecomposer)
+        monkeypatch.setattr(
+            replay_manipulation_planner_mod,
+            "ReplayManipulationPromptPlanner",
+            FakeReplayManipulationPromptPlanner,
+        )
+        monkeypatch.setattr(replay_visualizer_mod, "ReplayVisualizer", FakeReplayVisualizer)
+        monkeypatch.setattr(
+            main_module,
+            "_build_ordered_task_memory_runtime",
+            lambda *_args, **_kwargs: FakeOrderedTaskMemoryRuntime(),
+        )
+        monkeypatch.setattr(main_module, "_create_policy_agent", lambda _args: object())
+        monkeypatch.setattr(
+            main_module,
+            "_run_manipulation_subtask",
+            fake_run_manipulation_subtask,
+        )
+
+        args = main_module.Args(
+            replay_dataset="/tmp/episode_4.hdf5",
+            replay_mode="hybrid",
+            replay_manipulate_max_steps=4,
+            replay_manipulate_replan_interval_steps=2,
+            skip_server_checks=True,
+            prompt="long-horizon replay mock validation",
+            planner=PlannerConfig(
+                base_url="http://unused",
+                model="test",
+                task_spec_path="/tmp/fake.task_spec.json",
+            ),
+        )
+
+        main_module._run_replay_hybrid(args, args.prompt)
+
+        assert recorded["decompose_prompts"] == ordered_subtasks
+        assert recorded["manipulation_prompts"] == ordered_subtasks[:2]
+        assert "navigation_prompts" not in recorded
+        assert recorded["closed"] is True
+
     def test_run_manipulation_subtask_exports_debug_on_cap(self, tmp_path):
         from examples.piper_real import main as main_module
         from examples.piper_real import replay_manipulation_planner as replay_manipulation_planner_mod
