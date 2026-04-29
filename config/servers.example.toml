@@ -53,6 +53,18 @@ max_num_seqs = 512
 # gpu_memory_utilization = 0.95
 
 # ---------------------------------------------------------------------------
+# qz planner server
+# ---------------------------------------------------------------------------
+# Use with:
+#   PLANNER_BACKEND=qz bash scripts/run_piper_deploy.sh
+# Dynamic seq/api_key values are read from config/vllm_server_state.json by default.
+[qz]
+state_file = "config/vllm_server_state.json"
+served_model_name = "Qwen/Qwen3.5-9B"
+endpoint_template = "https://qwen35-9b-{seq}-inf.openapi-qb.sii.edu.cn/v1"
+proxy_url = "http://127.0.0.1:8888"
+
+# ---------------------------------------------------------------------------
 # Planner client defaults
 # ---------------------------------------------------------------------------
 [planner]

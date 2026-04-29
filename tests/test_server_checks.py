@@ -58,6 +58,27 @@ def test_check_planner_server_success(monkeypatch):
     assert result.models == ("Qwen/Qwen3-VL-8B-Instruct",)
 
 
+def test_check_planner_server_sends_bearer_auth(monkeypatch):
+    from examples.piper_real import server_checks
+
+    payload = {"data": [{"id": "Qwen/Qwen3.5-9B"}]}
+    captured = {}
+
+    def _urlopen(request, timeout=0):
+        captured["auth"] = request.get_header("Authorization")
+        return _FakeHttpResponse(payload)
+
+    monkeypatch.setattr(server_checks.urllib.request, "urlopen", _urlopen)
+
+    server_checks.check_planner_server(
+        "https://qwen35-9b-1-inf.openapi-qb.sii.edu.cn/v1",
+        expected_model="Qwen/Qwen3.5-9B",
+        api_key="secret-token",
+    )
+
+    assert captured["auth"] == "Bearer secret-token"
+
+
 def test_check_planner_server_missing_model(monkeypatch):
     from examples.piper_real import server_checks
 
@@ -103,9 +124,11 @@ def test_run_required_server_checks_calls_helpers(monkeypatch):
     from examples.piper_real import main as main_mod
 
     calls = []
+    planner_kwargs = {}
 
     def _planner(*args, **kwargs):
         calls.append("planner")
+        planner_kwargs.update(kwargs)
 
     def _pi0(*args, **kwargs):
         calls.append("pi0")
@@ -120,9 +143,11 @@ def test_run_required_server_checks_calls_helpers(monkeypatch):
     args.port = 8001
     args.planner.base_url = "http://127.0.0.1:8000/v1"
     args.planner.model = "Qwen/Qwen3-VL-8B-Instruct"
+    args.planner.api_key = "planner-secret"
 
     assert main_mod._run_required_server_checks(args, needs_pi0=True, needs_planner=True) is True
     assert calls == ["planner", "pi0"]
+    assert planner_kwargs["api_key"] == "planner-secret"
 
 
 def test_run_required_server_checks_returns_false_on_failure(monkeypatch):

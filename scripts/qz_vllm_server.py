@@ -33,7 +33,7 @@ API_KEY = ""
 # Resolve project root from script location.
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
-STATE_FILE = PROJECT_ROOT / "config" / "server_state.json"
+STATE_FILE = PROJECT_ROOT / "config" / "vllm_server_state.json"
 ENV_FILE = PROJECT_ROOT / ".env"
 SEQ = -1
 

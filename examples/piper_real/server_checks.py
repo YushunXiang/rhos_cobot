@@ -44,10 +44,13 @@ def check_planner_server(
     *,
     expected_model: str = "",
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+    api_key: str | None = None,
 ) -> PlannerCheckResult:
     models_url = planner_models_url(base_url)
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    request = urllib.request.Request(models_url, headers=headers)
     try:
-        with urllib.request.urlopen(models_url, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
             payload = json.load(response)
     except urllib.error.URLError as exc:
         raise ServerCheckError(f"planner check failed for {models_url}: {exc}") from exc
@@ -107,6 +110,7 @@ def check_pi0_server(
 class CliArgs:
     planner_base_url: str
     planner_model: str = ""
+    planner_api_key: str = ""
     pi0_host: str = ""
     pi0_port: int = 0
     timeout_sec: float = DEFAULT_TIMEOUT_SEC
@@ -119,6 +123,7 @@ def run_cli(args: CliArgs) -> None:
             args.planner_base_url,
             expected_model=args.planner_model,
             timeout_sec=args.timeout_sec,
+            api_key=args.planner_api_key or None,
         )
         print("planner models:", ", ".join(result.models) if result.models else "<empty>")
 
@@ -137,6 +142,7 @@ def _parse_cli_args() -> CliArgs:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--planner-base-url", default="")
     parser.add_argument("--planner-model", default="")
+    parser.add_argument("--planner-api-key", default="")
     parser.add_argument("--pi0-host", default="")
     parser.add_argument("--pi0-port", type=int, default=0)
     parser.add_argument("--timeout-sec", type=float, default=DEFAULT_TIMEOUT_SEC)
@@ -145,6 +151,7 @@ def _parse_cli_args() -> CliArgs:
     return CliArgs(
         planner_base_url=ns.planner_base_url,
         planner_model=ns.planner_model,
+        planner_api_key=ns.planner_api_key,
         pi0_host=ns.pi0_host,
         pi0_port=ns.pi0_port,
         timeout_sec=ns.timeout_sec,

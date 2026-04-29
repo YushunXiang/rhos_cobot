@@ -93,6 +93,7 @@ class Args:
     replay_manipulate_replan_interval_steps: int = (
         DEFAULT_REPLAY_MANIPULATE_REPLAN_INTERVAL_STEPS
     )
+    progress_head_mode: str = "auto"  # auto | force | off
     use_llm_planner: bool = False
     use_robot_base: bool = False
     robot_base_topic: str = DEFAULT_ROBOT_BASE_TOPIC
@@ -148,6 +149,7 @@ def _run_required_server_checks(
                 args.planner.base_url,
                 expected_model=args.planner.model,
                 timeout_sec=args.server_check_timeout_sec,
+                api_key=args.planner.api_key or None,
             )
         if needs_pi0:
             _server_checks.check_pi0_server(
@@ -520,6 +522,7 @@ def _run_manipulation_subtask(
     progress_stall_steps: int,
     progress_regression_threshold: float,
     progress_confirm_with_replanner: bool,
+    progress_head_mode: str = "auto",
     debug_export_dir: str = "",
     subtask_index: int | None = None,
     total_subtasks: int | None = None,
@@ -531,7 +534,17 @@ def _run_manipulation_subtask(
     subtask_start_cursor = (
         environment.get_cursor() if hasattr(environment, "get_cursor") else 0
     )
-    has_progress_head = bool(getattr(agent, "policy_metadata", {}).get("has_progress_head", False))
+    progress_head_mode = str(progress_head_mode or "auto").strip().lower()
+    if progress_head_mode not in {"auto", "force", "off"}:
+        raise ValueError("progress_head_mode must be one of: auto, force, off")
+    metadata_has_progress_head = bool(
+        getattr(agent, "policy_metadata", {}).get("has_progress_head", False)
+    )
+    has_progress_head = (
+        metadata_has_progress_head
+        if progress_head_mode == "auto"
+        else progress_head_mode == "force"
+    )
     progress_tracker = ReplayTaskProgressTracker(
         complete_threshold=progress_complete_threshold,
         stall_threshold=progress_stall_threshold,
@@ -557,13 +570,14 @@ def _run_manipulation_subtask(
         logging.warning("Visual completion detector unavailable: %s", exc)
     logging.info(
         "Manipulate subtask %s/%s start: prompt=%s max_steps=%d "
-        "replan_interval_steps=%d has_progress_head=%s",
+        "replan_interval_steps=%d has_progress_head=%s progress_head_mode=%s",
         subtask_index if subtask_index is not None else "?",
         total_subtasks if total_subtasks is not None else "?",
         subtask_prompt,
         max_steps,
         replan_interval_steps,
         has_progress_head,
+        progress_head_mode,
     )
 
     def _replan(policy_steps: int) -> bool:
@@ -1266,6 +1280,7 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
                 progress_stall_steps=args.planner.progress_stall_steps,
                 progress_regression_threshold=args.planner.progress_regression_threshold,
                 progress_confirm_with_replanner=args.planner.progress_confirm_with_replanner,
+                progress_head_mode=args.progress_head_mode,
                 debug_export_dir=debug_export_dir,
                 subtask_index=idx + 1,
                 total_subtasks=len(subtask_list),
@@ -1623,6 +1638,7 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
                 progress_stall_steps=args.planner.progress_stall_steps,
                 progress_regression_threshold=args.planner.progress_regression_threshold,
                 progress_confirm_with_replanner=args.planner.progress_confirm_with_replanner,
+                progress_head_mode=args.progress_head_mode,
                 debug_export_dir="",
                 subtask_index=idx + 1,
                 total_subtasks=len(subtask_list),
