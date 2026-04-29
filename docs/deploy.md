@@ -69,3 +69,75 @@ python -m examples.piper_real.main \
 ```
 
 `--host` 和 `--port` 对应 pi0 policy server 的地址和端口；只有在启用 `--use-llm-planner` 时，才需要额外配置 `--planner.base-url` 指向 qwen-vl / vLLM planner——详见 [`dual_system_deploy.md`](dual_system_deploy.md)。
+
+## 4. Real deploy：hybrid + qz planner
+
+`scripts/run_piper_deploy.sh` 不负责启动 pi0 policy server；它连接已经运行的 pi0，并在 `MODE=hybrid` 下调用 VLM planner 做导航/操作子任务调度。启动 checkpoint 时使用的 `POLICY_CONFIG`、`CHECKPOINT_DIR`、`PROGRESS_SOURCE` 需要传给 `scripts/start_pi0_server_local.sh` 或远端启动脚本，而不是依赖 `run_piper_deploy.sh` 自动拉起。
+
+### 4.1 带 progress checkpoint
+
+先启动带 progress head 的 pi0 server。若 pi0 在本机：
+
+```bash
+POLICY_CONFIG=pi05_pick_bread_leaf_1+pick_bread_leaf_2+pick_bread_leaf_3 \
+CHECKPOINT_DIR=/inspire/qb-ilm/project/robot-reasoning/xiangyushun-p-xiangyushun/yushun/openpi/checkpoints/pi05_pick_bread_leaf_1+pick_bread_leaf_2+pick_bread_leaf_3/pi05_pick_bread_leaf_progress_dual_20260424_061145/99999 \
+PROGRESS_SOURCE=subtask \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/start_pi0_server_local.sh
+```
+
+然后运行 real deploy：
+
+```bash
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+    -u all_proxy -u ALL_PROXY -u socks_proxy -u SOCKS_PROXY \
+    -u no_proxy -u NO_PROXY \
+    MODE=hybrid \
+    TASK_NAME=pick_bread_leaf_3 \
+    TASK_SPEC=none \
+    MANIPULATE_MAX_STEPS=10000 \
+    MANIPULATE_REPLAN_INTERVAL_STEPS=100 \
+    PROGRESS_HEAD_MODE=auto \
+    PLANNER_BACKEND=qz \
+    QZ_STATE_FILE=config/vllm_server_state.json \
+    QZ_USE_PROXY=0 \
+    bash scripts/run_piper_deploy.sh
+```
+
+说明：
+
+- `PROGRESS_SOURCE=subtask` 让 pi0 server 返回子任务进度，适合 hybrid 的单个 manipulate subtask。
+- `PROGRESS_HEAD_MODE=auto` 让 deploy 端根据 pi0 metadata 自动启用 progress-first 完成检测。
+- 如果 pi0 不在本机，先用远端方式启动同一个 checkpoint，并确认 `PI0_HOST` 指向可达的 websocket 地址。
+
+### 4.2 不带 progress checkpoint
+
+先启动不带 progress head 的 pi0 server：
+
+```bash
+POLICY_CONFIG=pi05_pick_bread_leaf_1+pick_bread_leaf_2+pick_bread_leaf_3 \
+CHECKPOINT_DIR=/path/to/non_progress_checkpoint \
+PROGRESS_SOURCE=task \
+CUDA_VISIBLE_DEVICES=0 \
+bash scripts/start_pi0_server_local.sh
+```
+
+然后关闭 deploy 端 progress-first 逻辑：
+
+```bash
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+    -u all_proxy -u ALL_PROXY -u socks_proxy -u SOCKS_PROXY \
+    -u no_proxy -u NO_PROXY \
+    MODE=hybrid \
+    TASK_NAME=pick_bread_leaf_3 \
+    TASK_SPEC=none \
+    MANIPULATE_MAX_STEPS=10000 \
+    MANIPULATE_REPLAN_INTERVAL_STEPS=100 \
+    PROGRESS_HEAD_MODE=off \
+    PLANNER_BACKEND=qz \
+    QZ_STATE_FILE=config/vllm_server_state.json \
+    QZ_USE_PROXY=0 \
+    bash scripts/run_piper_deploy.sh
+```
+
+其中 `/path/to/non_progress_checkpoint` 需要替换为不带 progress head 的真实 checkpoint 目录。

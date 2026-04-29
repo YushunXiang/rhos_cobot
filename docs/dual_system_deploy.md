@@ -413,6 +413,9 @@ START_TARGET=all bash scripts/run_piper_replay_mock.sh local
 - `PLANNER_HOST` / `PLANNER_PORT` / `PLANNER_MODEL`：planner 服务地址、端口、模型名；未设置时从 `config/servers.toml` 取。
 - `MANIPULATE_MAX_STEPS`（默认 64）：hybrid 模式下每个 manipulate subtask 的策略步数上限。
 - `MANIPULATE_REPLAN_INTERVAL_STEPS`（默认 16）：hybrid 模式下 VLM prompt 重规划的策略步间隔。
+- `PROGRESS_HEAD_MODE`：`auto|force|off`。带 progress checkpoint 时通常用 `auto`；不带 progress checkpoint 时用 `off`，只依赖固定间隔 VLM replanner。
+- `PROGRESS_SOURCE`：启动 OpenPI/pi0 server 时选择暴露到 `action["progress"]` 的进度头，`task|subtask`。hybrid 单个 manipulate 子任务通常用 `subtask`。
+- `POLICY_CONFIG` / `CHECKPOINT_DIR`：启动 pi0 server 时选择 OpenPI config 与 checkpoint；带 progress 的 bread/lettuce checkpoint 参考 [`replay.md`](replay.md#51-带-progress-checkpoint)。
 - `WAIT_FOR_PLANNER_READY` / `PLANNER_READY_TIMEOUT_SEC` / `PLANNER_READY_RETRY_INTERVAL_SEC` / `PLANNER_READY_CHECK_TIMEOUT_SEC`：planner 预检开关与超时。
 
 ```bash
@@ -420,6 +423,8 @@ REPLAY_MODE=hybrid START_TARGET=all bash scripts/run_piper_replay_mock.sh local
 # 或：
 bash scripts/run_piper_replay_mock.sh --hybrid-replay local
 ```
+
+带 progress / 不带 progress 的完整 `run_piper_replay_mock.sh` 命令见 [`replay.md`](replay.md#5-piper-hybrid-replay-mockvlm--pi0)。real deploy 对应启动方式见 [`deploy.md`](deploy.md#4-real-deployhybrid--qz-planner)。
 
 `planner` 模式仅依赖 vLLM planner server，不启 pi0，并保留离线逐步 VLM 导航调试能力。专属环境变量 `NAVIGATION_ONLY`（默认 `1`）：为 `1` 时过滤掉 decomposition 日志里的 manipulate 子任务。`START_TARGET` 合法值在此模式下为 `planner`（默认）或 `all`。等价调用（替代旧的 `run_piper_replay_planner.sh`）：
 

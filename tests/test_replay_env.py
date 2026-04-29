@@ -7,7 +7,6 @@ from pathlib import Path
 import cv2
 import h5py
 import numpy as np
-import pytest
 
 
 def _create_test_hdf5(
@@ -859,6 +858,7 @@ class TestMainReplayIntegration:
     def test_run_replay_hybrid_aborts_when_manipulate_subtask_hits_cap(self, monkeypatch):
         from examples.piper_real import main as main_module
         from examples.piper_real import replay_env as replay_env_mod
+        from examples.piper_real import replay_manipulation_planner as replay_manipulation_planner_mod
         from examples.piper_real import replay_visualizer as replay_visualizer_mod
         from examples.piper_real import task_decomposer as task_decomposer_mod
         from examples.piper_real.planner_config import PlannerConfig
@@ -911,9 +911,18 @@ class TestMainReplayIntegration:
             def close(self) -> None:
                 pass
 
+        class FakeReplayManipulationPromptPlanner:
+            def __init__(self, *_args, **_kwargs) -> None:
+                pass
+
         monkeypatch.setattr(replay_env_mod, "ReplayEnvironment", FakeReplayEnvironment)
         monkeypatch.setattr(task_decomposer_mod, "TaskDecomposer", FakeTaskDecomposer)
         monkeypatch.setattr(replay_visualizer_mod, "ReplayVisualizer", FakeReplayVisualizer)
+        monkeypatch.setattr(
+            replay_manipulation_planner_mod,
+            "ReplayManipulationPromptPlanner",
+            FakeReplayManipulationPromptPlanner,
+        )
         monkeypatch.setattr(main_module, "_create_policy_agent", lambda _args: object())
         monkeypatch.setattr(
             main_module,

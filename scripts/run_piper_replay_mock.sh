@@ -63,6 +63,16 @@ Environment overrides:
   MANIPULATE_REPLAN_INTERVAL_STEPS
                      Policy-step interval between VLM prompt replans in hybrid mode
                      default: 16
+  POLICY_CONFIG      OpenPI policy config used when starting a local/remote pi0 server
+                     default: pi05_pick_bread_leaf_1+pick_bread_leaf_2+pick_bread_leaf_3
+  CHECKPOINT_DIR     OpenPI checkpoint used when starting a local/remote pi0 server
+                     default: /inspire/qb-ilm/project/robot-reasoning/xiangyushun-p-xiangyushun/yushun/openpi/checkpoints/pi05_pick_bread_leaf_1+pick_bread_leaf_2+pick_bread_leaf_3/pi05_pick_bread_leaf_progress_dual_20260424_061145/99999
+  PROGRESS_SOURCE    Progress head exposed by OpenPI as action["progress"]
+                     values: task, subtask
+                     default: subtask
+  PROGRESS_HEAD_MODE Hybrid progress handling in examples.piper_real.main
+                     values: auto, force, off
+                     default: auto
   TASK_SPEC          Common alias for REPLAY_TASK_SPEC when REPLAY_TASK_SPEC is unset
   REPLAY_TASK_SPEC   Ordered task-spec JSON passed to hybrid ordered-task memory
                      default: config/episode4_plate_wash_sandwich.task_spec.json
@@ -78,6 +88,16 @@ Environment overrides:
                      default: value from config/servers.toml
   PLANNER_MODEL      Planner model name (planner/hybrid modes)
                      default: value from config/servers.toml for the selected mode
+  PLANNER_BACKEND    Planner backend (planner/hybrid modes)
+                     values: vllm, qz
+                     default: vllm
+  QZ_STATE_FILE      qz planner state JSON with seq/api_key
+                     default: config/servers.toml -> qz.state_file, else
+                     config/vllm_server_state.json
+  QZ_ENDPOINT_TEMPLATE
+                     qz OpenAI-compatible endpoint template
+                     default: config/servers.toml -> qz.endpoint_template, else
+                     https://qwen35-9b-{seq}-inf.openapi-qb.sii.edu.cn/v1
   PLANNER_REPLANNER_ENABLE_THINKING
                      Enable Qwen thinking for manipulation replanner requests
                      values: 0, 1, true, false
@@ -358,6 +378,7 @@ wait_for_pi0_ready() {
 wait_for_planner_ready() {
   local base_url="$1"
   local model="$2"
+  local api_key="${3:-}"
 
   if [[ "${WAIT_FOR_PLANNER_READY:-1}" != "1" ]]; then
     return 0
@@ -376,11 +397,17 @@ wait_for_planner_ready() {
 
   echo "Waiting for planner server at $base_url ..."
   while true; do
-    if "$PYTHON_CMD" -m examples.piper_real.server_checks \
+    local -a check_cmd=(
+      "$PYTHON_CMD" -m examples.piper_real.server_checks
       --planner-base-url "$base_url" \
       --planner-model "$model" \
       --timeout-sec "$check_timeout_sec" \
-      >/dev/null 2>&1; then
+    )
+    if [[ -n "$api_key" ]]; then
+      check_cmd+=(--planner-api-key "$api_key")
+    fi
+
+    if "${check_cmd[@]}" >/dev/null 2>&1; then
       echo "Planner server is ready: $base_url"
       return 0
     fi
@@ -395,6 +422,45 @@ wait_for_planner_ready() {
     attempt=$((attempt + 1))
     sleep "$retry_interval_sec"
   done
+}
+
+qz_state_value() {
+  local key="$1"
+  python3 -c '
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+try:
+    data = json.loads(path.read_text())
+except FileNotFoundError:
+    print(f"qz state file does not exist: {path}", file=sys.stderr)
+    sys.exit(1)
+except json.JSONDecodeError as exc:
+    print(f"invalid qz state file {path}: {exc}", file=sys.stderr)
+    sys.exit(1)
+value = data.get(key, "")
+print(value)
+' "$QZ_STATE_FILE" "$key"
+}
+
+print_command_redacted() {
+  local redact_next=0
+  local arg
+  for arg in "$@"; do
+    if [[ "$redact_next" == "1" ]]; then
+      printf ' %q' "<redacted>"
+      redact_next=0
+      continue
+    fi
+    printf ' %q' "$arg"
+    if [[ "$arg" == "--planner.api-key" ]]; then
+      redact_next=1
+    fi
+  done
+  printf '\n'
 }
 
 DATASET="${DATASET:-/inspire/qb-ilm/project/robot-reasoning/xiangyushun-p-xiangyushun/yushun/aloha-data/long-horizon-demo/episode_4.hdf5}"
@@ -429,9 +495,17 @@ fi
 MAX_EPISODE_STEPS="${MAX_EPISODE_STEPS:-0}"
 MANIPULATE_MAX_STEPS="${MANIPULATE_MAX_STEPS:-64}"
 MANIPULATE_REPLAN_INTERVAL_STEPS="${MANIPULATE_REPLAN_INTERVAL_STEPS:-16}"
+DEFAULT_PROGRESS_POLICY_CONFIG="pi05_pick_bread_leaf_1+pick_bread_leaf_2+pick_bread_leaf_3"
+DEFAULT_PROGRESS_CHECKPOINT_DIR="/inspire/qb-ilm/project/robot-reasoning/xiangyushun-p-xiangyushun/yushun/openpi/checkpoints/pi05_pick_bread_leaf_1+pick_bread_leaf_2+pick_bread_leaf_3/pi05_pick_bread_leaf_progress_dual_20260424_061145/99999"
+POLICY_CONFIG="${POLICY_CONFIG:-$DEFAULT_PROGRESS_POLICY_CONFIG}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-$DEFAULT_PROGRESS_CHECKPOINT_DIR}"
+PROGRESS_SOURCE="${PROGRESS_SOURCE:-subtask}"
+PROGRESS_HEAD_MODE="${PROGRESS_HEAD_MODE:-auto}"
 NAVIGATION_ONLY="${NAVIGATION_ONLY:-1}"
 PYTHON_CMD="${PYTHON_CMD:-$(server_default_python_cmd)}"
 START_SERVERS="${START_SERVERS:-1}"
+PLANNER_BACKEND="${PLANNER_BACKEND:-vllm}"
+PLANNER_BACKEND="${PLANNER_BACKEND,,}"
 
 if [[ "$REPLAY_MODE" == "planner" ]]; then
   START_TARGET="${START_TARGET:-planner}"
@@ -457,6 +531,15 @@ case "$REPLAY_MODE" in
 esac
 
 server_require_config
+
+case "$PLANNER_BACKEND" in
+  vllm|qz)
+    ;;
+  *)
+    echo "PLANNER_BACKEND must be 'vllm' or 'qz'." >&2
+    exit 2
+    ;;
+esac
 
 if [[ "$REPLAY_MODE" == "planner" && "$MODE" == "mock" ]]; then
   echo "REPLAY_MODE=planner does not use pi0; MODE=mock has no effect. Use MODE=none/local/remote." >&2
@@ -488,39 +571,87 @@ fi
 server_require_nonnegative_int "MAX_EPISODE_STEPS" "$MAX_EPISODE_STEPS"
 server_require_positive_int "MANIPULATE_MAX_STEPS" "$MANIPULATE_MAX_STEPS"
 server_require_positive_int "MANIPULATE_REPLAN_INTERVAL_STEPS" "$MANIPULATE_REPLAN_INTERVAL_STEPS"
+case "$PROGRESS_SOURCE" in
+  task|subtask)
+    ;;
+  *)
+    echo "PROGRESS_SOURCE must be one of: task, subtask." >&2
+    exit 2
+    ;;
+esac
+case "${PROGRESS_HEAD_MODE,,}" in
+  auto|force|off)
+    PROGRESS_HEAD_MODE="${PROGRESS_HEAD_MODE,,}"
+    ;;
+  *)
+    echo "PROGRESS_HEAD_MODE must be one of: auto, force, off." >&2
+    exit 2
+    ;;
+esac
 
 PLANNER_BASE_URL=""
+PLANNER_API_KEY=""
 PLANNER_REPLANNER_ENABLE_THINKING="${PLANNER_REPLANNER_ENABLE_THINKING:-$(server_cfg_optional planner.manipulation_replanner_enable_thinking)}"
 PLANNER_REPLANNER_MAX_TOKENS="${PLANNER_REPLANNER_MAX_TOKENS:-$(server_cfg_optional planner.manipulation_replanner_max_tokens)}"
 if [[ "$NEED_PLANNER" == "1" ]]; then
-  PLANNER_PORT="${PLANNER_PORT:-$(server_cfg vllm.port)}"
+  case "$PLANNER_BACKEND" in
+    vllm)
+      PLANNER_PORT="${PLANNER_PORT:-$(server_cfg vllm.port)}"
 
-  if [[ -z "${PLANNER_HOST:-}" ]]; then
-    if [[ "$MODE" == "remote" ]]; then
-      PLANNER_HOST="$(server_cfg_optional vllm.remote.host)"
-      if [[ -z "$PLANNER_HOST" ]]; then
-        echo "PLANNER_HOST is required in remote mode for REPLAY_MODE=hybrid. Set PLANNER_HOST or configure vllm.remote.host in config/servers.toml." >&2
+      if [[ -z "${PLANNER_HOST:-}" ]]; then
+        if [[ "$MODE" == "remote" ]]; then
+          PLANNER_HOST="$(server_cfg_optional vllm.remote.host)"
+          if [[ -z "$PLANNER_HOST" ]]; then
+            echo "PLANNER_HOST is required in remote mode for REPLAY_MODE=hybrid. Set PLANNER_HOST or configure vllm.remote.host in config/servers.toml." >&2
+            exit 1
+          fi
+        elif [[ -n "${PI0_HOST:-}" ]]; then
+          PLANNER_HOST="$PI0_HOST"
+        elif [[ "$MODE" == "remote" ]]; then
+          echo "PLANNER_HOST is required in remote mode for REPLAY_MODE=$REPLAY_MODE." >&2
+          exit 1
+        else
+          PLANNER_HOST="127.0.0.1"
+        fi
+      fi
+
+      if [[ -z "${PLANNER_MODEL:-}" ]]; then
+        if [[ "$MODE" == "remote" ]]; then
+          PLANNER_MODEL="$(server_cfg vllm.remote.served_model_name)"
+        else
+          PLANNER_MODEL="$(server_cfg vllm.local.served_model_name)"
+        fi
+      fi
+
+      PLANNER_BASE_URL="http://$PLANNER_HOST:$PLANNER_PORT/v1"
+      ;;
+    qz)
+      QZ_STATE_FILE="${QZ_STATE_FILE:-$(server_cfg_optional qz.state_file)}"
+      QZ_STATE_FILE="${QZ_STATE_FILE:-$SERVER_REPO_ROOT/config/vllm_server_state.json}"
+      if [[ "$QZ_STATE_FILE" != /* ]]; then
+        QZ_STATE_FILE="$SERVER_REPO_ROOT/$QZ_STATE_FILE"
+      fi
+      QZ_SEQ="${QZ_SEQ:-$(qz_state_value seq)}"
+      PLANNER_API_KEY="${PLANNER_API_KEY:-$(qz_state_value api_key)}"
+      if [[ -z "$QZ_SEQ" || "$QZ_SEQ" == "0" ]]; then
+        echo "qz seq is missing or zero in $QZ_STATE_FILE. Run scripts/qz_vllm_server.py --create first." >&2
         exit 1
       fi
-    elif [[ -n "${PI0_HOST:-}" ]]; then
-      PLANNER_HOST="$PI0_HOST"
-    elif [[ "$MODE" == "remote" ]]; then
-      echo "PLANNER_HOST is required in remote mode for REPLAY_MODE=$REPLAY_MODE." >&2
-      exit 1
-    else
-      PLANNER_HOST="127.0.0.1"
-    fi
-  fi
-
-  if [[ -z "${PLANNER_MODEL:-}" ]]; then
-    if [[ "$MODE" == "remote" ]]; then
-      PLANNER_MODEL="$(server_cfg vllm.remote.served_model_name)"
-    else
-      PLANNER_MODEL="$(server_cfg vllm.local.served_model_name)"
-    fi
-  fi
-
-  PLANNER_BASE_URL="http://$PLANNER_HOST:$PLANNER_PORT/v1"
+      if [[ -z "$PLANNER_API_KEY" ]]; then
+        echo "qz api_key is missing in $QZ_STATE_FILE." >&2
+        exit 1
+      fi
+      PLANNER_MODEL="${PLANNER_MODEL:-$(server_cfg_optional qz.served_model_name)}"
+      PLANNER_MODEL="${PLANNER_MODEL:-Qwen/Qwen3.5-9B}"
+      QZ_ENDPOINT_TEMPLATE="${QZ_ENDPOINT_TEMPLATE:-$(server_cfg_optional qz.endpoint_template)}"
+      if [[ -z "$QZ_ENDPOINT_TEMPLATE" ]]; then
+        QZ_ENDPOINT_TEMPLATE='https://qwen35-9b-{seq}-inf.openapi-qb.sii.edu.cn/v1'
+      fi
+      if [[ -z "${PLANNER_BASE_URL:-}" ]]; then
+        PLANNER_BASE_URL="$(python3 -c 'import sys; print(sys.argv[1].replace("{seq}", sys.argv[2]))' "$QZ_ENDPOINT_TEMPLATE" "$QZ_SEQ")"
+      fi
+      ;;
+  esac
 fi
 
 PLANNER_REPLANNER_ENABLE_THINKING="$(server_normalize_bool "$PLANNER_REPLANNER_ENABLE_THINKING")"
@@ -539,6 +670,7 @@ fi
 PYTHON_CMD="$(server_resolve_python_cmd "$PYTHON_CMD")"
 OPENPI_CLIENT_SRC="$(server_resolve_openpi_client_src "$OPENPI_ROOT" "$OPENPI_CLIENT_SRC")"
 server_export_openpi_pythonpath "$OPENPI_CLIENT_SRC"
+export POLICY_CONFIG CHECKPOINT_DIR PROGRESS_SOURCE
 
 if [[ "$START_TARGET" == "all" && "$REPLAY_MODE" == "policy" ]]; then
   echo "Note: START_TARGET=all only starts the planner server in addition to pi0."
@@ -569,6 +701,15 @@ EFFECTIVE_START_TARGET="$START_TARGET"
 if [[ "$REPLAY_MODE" == "hybrid" && "$START_SERVERS" == "1" && "$MODE" != "none" && "$MODE" != "mock" && "$EFFECTIVE_START_TARGET" == "pi0" ]]; then
   echo "REPLAY_MODE=hybrid requires planner + pi0; promoting START_TARGET=pi0 to all."
   EFFECTIVE_START_TARGET="all"
+fi
+if [[ "$NEED_PLANNER" == "1" && "$PLANNER_BACKEND" == "qz" && "$START_SERVERS" == "1" && "$MODE" != "none" && "$MODE" != "mock" && "$EFFECTIVE_START_TARGET" == "all" ]]; then
+  if [[ "$NEED_PI0" == "1" ]]; then
+    echo "PLANNER_BACKEND=qz uses an external planner; starting pi0 only."
+    EFFECTIVE_START_TARGET="pi0"
+  else
+    echo "PLANNER_BACKEND=qz uses an external planner; skipping planner startup."
+    START_SERVERS=0
+  fi
 fi
 
 if [[ "$START_SERVERS" == "1" && "$MODE" != "none" && "$MODE" != "mock" ]]; then
@@ -611,7 +752,7 @@ if [[ "$NEED_PI0" == "1" ]]; then
   wait_for_pi0_ready "$PI0_HOST" "$PI0_PORT"
 fi
 if [[ "$NEED_PLANNER" == "1" ]]; then
-  wait_for_planner_ready "$PLANNER_BASE_URL" "$PLANNER_MODEL"
+  wait_for_planner_ready "$PLANNER_BASE_URL" "$PLANNER_MODEL" "$PLANNER_API_KEY"
 fi
 
 cmd=(
@@ -632,6 +773,9 @@ if [[ "$REPLAY_MODE" == "planner" ]]; then
     --planner.base-url "$PLANNER_BASE_URL"
     --planner.model "$PLANNER_MODEL"
   )
+  if [[ -n "$PLANNER_API_KEY" ]]; then
+    cmd+=(--planner.api-key "$PLANNER_API_KEY")
+  fi
   if [[ "$NAVIGATION_ONLY" == "1" ]]; then
     cmd+=(--navigation-only)
   fi
@@ -644,7 +788,11 @@ if [[ "$REPLAY_MODE" == "hybrid" ]]; then
     --planner.model "$PLANNER_MODEL"
     --replay-manipulate-max-steps "$MANIPULATE_MAX_STEPS"
     --replay-manipulate-replan-interval-steps "$MANIPULATE_REPLAN_INTERVAL_STEPS"
+    --progress-head-mode "$PROGRESS_HEAD_MODE"
   )
+  if [[ -n "$PLANNER_API_KEY" ]]; then
+    cmd+=(--planner.api-key "$PLANNER_API_KEY")
+  fi
   if [[ -n "$PLANNER_REPLANNER_ENABLE_THINKING" ]]; then
     if [[ "$PLANNER_REPLANNER_ENABLE_THINKING" == "1" ]]; then
       cmd+=(--planner.manipulation-replanner-enable-thinking)
@@ -677,6 +825,9 @@ echo "Replay mode: $REPLAY_MODE"
 if [[ "$NEED_PI0" == "1" ]]; then
   echo "PI0 host: $PI0_HOST"
   echo "PI0 port: $PI0_PORT"
+  echo "Policy config: $POLICY_CONFIG"
+  echo "Checkpoint: $CHECKPOINT_DIR"
+  echo "Progress source: $PROGRESS_SOURCE"
 fi
 echo "Dataset: $DATASET"
 echo "Task name: ${TASK_NAME:-<unset>}"
@@ -684,8 +835,12 @@ echo "Prompt: $PROMPT"
 echo "Prompt source: $PROMPT_SOURCE"
 echo "Max episode steps: $MAX_EPISODE_STEPS"
 if [[ "$NEED_PLANNER" == "1" ]]; then
+  echo "Planner backend: $PLANNER_BACKEND"
   echo "Planner base URL: $PLANNER_BASE_URL"
   echo "Planner model: $PLANNER_MODEL"
+  if [[ "$PLANNER_BACKEND" == "qz" ]]; then
+    echo "qz state file: $QZ_STATE_FILE"
+  fi
 fi
 if [[ "$REPLAY_MODE" == "planner" ]]; then
   echo "Navigation only: $NAVIGATION_ONLY"
@@ -693,6 +848,7 @@ fi
 if [[ "$REPLAY_MODE" == "hybrid" ]]; then
   echo "Manipulate max steps: $MANIPULATE_MAX_STEPS"
   echo "Manipulate replan interval steps: $MANIPULATE_REPLAN_INTERVAL_STEPS"
+  echo "Progress head mode: $PROGRESS_HEAD_MODE"
   echo "Manipulation replanner enable thinking: ${PLANNER_REPLANNER_ENABLE_THINKING:-<default>}"
   echo "Manipulation replanner max tokens: ${PLANNER_REPLANNER_MAX_TOKENS:-<default>}"
   echo "Replay task spec: ${REPLAY_TASK_SPEC:-<unset>}"
@@ -703,7 +859,6 @@ echo "Python: $PYTHON_CMD"
 echo "openpi_client src: $OPENPI_CLIENT_SRC"
 echo "Start target: $EFFECTIVE_START_TARGET"
 echo "Running:"
-printf '  %q' "${cmd[@]}"
-printf '\n'
+print_command_redacted "${cmd[@]}"
 
 "${cmd[@]}"
