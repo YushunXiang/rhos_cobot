@@ -215,6 +215,7 @@ def _build_command(
     policy_config: str,
     default_prompt: str,
     record: bool,
+    progress_source: str,
 ) -> str:
     if os.environ.get("QZ_PI0_COMMAND"):
         return os.environ["QZ_PI0_COMMAND"]
@@ -235,6 +236,7 @@ def _build_command(
             "policy:checkpoint",
             f"--policy.config={policy_config}",
             "--policy.dir=${MODEL_PATH}",
+            f"--policy.progress-source={progress_source}",
         ]
     )
 
@@ -353,6 +355,9 @@ def create(token: str, args: argparse.Namespace) -> None:
     )
     domain_prefix = args.domain_prefix or os.environ.get("QZ_PI0_DOMAIN_PREFIX", "pi0")
     default_prompt = args.default_prompt or os.environ.get("QZ_PI0_DEFAULT_PROMPT", "")
+    progress_source = args.progress_source or os.environ.get("QZ_PI0_PROGRESS_SOURCE", "task")
+    if progress_source not in {"task", "subtask"}:
+        raise RuntimeError("progress source must be one of: task, subtask")
     record = args.record or os.environ.get("QZ_PI0_RECORD", "0").lower() in {
         "1",
         "true",
@@ -368,6 +373,7 @@ def create(token: str, args: argparse.Namespace) -> None:
             ),
             default_prompt=default_prompt,
             record=record,
+            progress_source=progress_source,
         ),
         "custom_domain": f"{domain_prefix}-{SEQ}-inf",
         "image": _require(image, "--image or QZ_PI0_IMAGE"),
@@ -443,6 +449,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--spec-id", default="")
     parser.add_argument("--domain-prefix", default="")
     parser.add_argument("--default-prompt", default="")
+    parser.add_argument("--progress-source", choices=("task", "subtask"), default="")
     parser.add_argument("--record", action="store_true")
     parser.add_argument("--health-uri", default="")
     parser.add_argument("--timeout-sec", type=float, default=10.0)

@@ -71,3 +71,65 @@ python -m scripts.post_collect.replay_data --dataset_dir ~/data --task_name aloh
 - 底盘：`/cmd_vel`
 
 如果需要末端位姿 replay，请使用 `python -m scripts.post_collect.replay_data_eef ...`。
+
+## 5. Piper hybrid replay mock（VLM + pi0）
+
+`scripts/run_piper_replay_mock.sh` 用 HDF5 数据集做离线观测回放，hybrid 模式下由 VLM 做任务拆解/重规划，pi0 负责 manipulate 动作推理。默认不会控制真实机器人。
+
+### 5.1 带 progress checkpoint
+
+适用于带 `assets/progress_metadata.json` 且 `has_progress_head=true` 的 checkpoint。下面命令使用 subtask progress 作为 `action["progress"]`，hybrid manipulate 会优先用 progress 判断当前子任务是否完成，VLM 负责更精确的 prompt replan 和 fallback。
+
+```bash
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+    -u all_proxy -u ALL_PROXY -u socks_proxy -u SOCKS_PROXY \
+    -u no_proxy -u NO_PROXY \
+    REPLAY_MODE=hybrid \
+    TASK_NAME=pick_bread_leaf_3 \
+    REPLAY_TASK_SPEC=none \
+    START_TARGET=all \
+    MANIPULATE_MAX_STEPS=64 \
+    MANIPULATE_REPLAN_INTERVAL_STEPS=16 \
+    POLICY_CONFIG=pi05_pick_bread_leaf_1+pick_bread_leaf_2+pick_bread_leaf_3 \
+    CHECKPOINT_DIR=/inspire/qb-ilm/project/robot-reasoning/xiangyushun-p-xiangyushun/yushun/openpi/checkpoints/pi05_pick_bread_leaf_1+pick_bread_leaf_2+pick_bread_leaf_3/pi05_pick_bread_leaf_progress_dual_20260424_061145/99999 \
+    PROGRESS_SOURCE=subtask \
+    PROGRESS_HEAD_MODE=auto \
+    PLANNER_BACKEND=qz \
+    QZ_STATE_FILE=config/vllm_server_state.json \
+    QZ_USE_PROXY=0 \
+    CUDA_VISIBLE_DEVICES=0 \
+    bash scripts/run_piper_replay_mock.sh
+```
+
+关键参数：
+
+- `PROGRESS_SOURCE=subtask`：OpenPI server 将 subtask progress 暴露为 `action["progress"]`。
+- `PROGRESS_HEAD_MODE=auto`：replay/hybrid 根据 pi0 server metadata 自动启用 progress-first 完成检测。
+- `REPLAY_TASK_SPEC=none`：只跑 bread/lettuce 三阶段时避免自动加载 `episode_4.hdf5` 的长任务 spec。
+
+### 5.2 不带 progress checkpoint
+
+不带 progress head 的 checkpoint 应关闭 progress-first 逻辑，让 hybrid manipulate 按固定间隔调用 VLM replanner。
+
+```bash
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+    -u all_proxy -u ALL_PROXY -u socks_proxy -u SOCKS_PROXY \
+    -u no_proxy -u NO_PROXY \
+    REPLAY_MODE=hybrid \
+    TASK_NAME=pick_bread_leaf_3 \
+    REPLAY_TASK_SPEC=none \
+    START_TARGET=all \
+    MANIPULATE_MAX_STEPS=64 \
+    MANIPULATE_REPLAN_INTERVAL_STEPS=16 \
+    POLICY_CONFIG=pi05_pick_bread_leaf_1+pick_bread_leaf_2+pick_bread_leaf_3 \
+    CHECKPOINT_DIR=/path/to/non_progress_checkpoint \
+    PROGRESS_SOURCE=task \
+    PROGRESS_HEAD_MODE=off \
+    PLANNER_BACKEND=qz \
+    QZ_STATE_FILE=config/vllm_server_state.json \
+    QZ_USE_PROXY=0 \
+    CUDA_VISIBLE_DEVICES=0 \
+    bash scripts/run_piper_replay_mock.sh
+```
+
+其中 `/path/to/non_progress_checkpoint` 需要替换为不带 progress head 的真实 checkpoint 目录。

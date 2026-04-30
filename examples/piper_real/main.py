@@ -270,7 +270,13 @@ def _refresh_environment_observation_cache(environment, *, context: str) -> None
         )
 
 
-def _build_replay_subtask_list(args: Args, prompt: str, ordered_task_memory_runtime=None):
+def _build_hybrid_subtask_list(
+    args: Args,
+    prompt: str,
+    ordered_task_memory_runtime=None,
+    *,
+    log_label: str = "Replay",
+):
     from examples.piper_real import task_decomposer as _task_decomposer
 
     decomposer = _task_decomposer.TaskDecomposer(args.planner)
@@ -280,7 +286,8 @@ def _build_replay_subtask_list(args: Args, prompt: str, ordered_task_memory_runt
             decompose_kwargs = ordered_task_memory_runtime.build_context()
         except Exception as exc:  # noqa: BLE001
             logging.warning(
-                "Replay decomposition is proceeding without ordered task memory context: %s",
+                "%s decomposition is proceeding without ordered task memory context: %s",
+                log_label,
                 exc,
             )
             decompose_kwargs = {}
@@ -293,8 +300,9 @@ def _build_replay_subtask_list(args: Args, prompt: str, ordered_task_memory_runt
     except _task_decomposer.DecompositionError as exc:
         if args.navigation_only:
             logging.warning(
-                "Replay decomposition failed in navigation-only mode (%s); "
+                "%s decomposition failed in navigation-only mode (%s); "
                 "using the original prompt as a single navigate subtask.",
+                log_label,
                 exc,
             )
             return [_task_decomposer.Subtask(type="navigate", prompt=prompt)]
@@ -305,12 +313,22 @@ def _build_replay_subtask_list(args: Args, prompt: str, ordered_task_memory_runt
         subtask.type == "navigate" for subtask in subtask_list
     ):
         logging.warning(
-            "Replay decomposition returned no navigate subtasks; "
-            "using the original prompt as a single navigate subtask."
+            "%s decomposition returned no navigate subtasks; "
+            "using the original prompt as a single navigate subtask.",
+            log_label,
         )
         return [_task_decomposer.Subtask(type="navigate", prompt=prompt)]
 
     return subtask_list
+
+
+def _build_replay_subtask_list(args: Args, prompt: str, ordered_task_memory_runtime=None):
+    return _build_hybrid_subtask_list(
+        args,
+        prompt,
+        ordered_task_memory_runtime=ordered_task_memory_runtime,
+        log_label="Replay",
+    )
 
 
 def _resolve_replay_debug_export_dir(args: Args) -> str:
@@ -871,6 +889,35 @@ def _log_hybrid_replay_summary(
         _log_replay_summary(environment, policy_steps)
 
 
+def _get_replay_ordered_completed_count(
+    ordered_task_memory_runtime,
+    *,
+    explicit_completed_count: int,
+) -> int:
+    task_spec = ordered_task_memory_runtime.task_spec
+    completed_count = max(
+        int(explicit_completed_count),
+        ordered_task_memory_runtime.memory.highest_completed_count(task_spec),
+    )
+    try:
+        decision = ordered_task_memory_runtime.observe()
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(
+            "Replay hybrid could not refresh ordered task progress; "
+            "falling back to explicit completed count: %s",
+            exc,
+        )
+        return min(completed_count, task_spec.done_index)
+
+    completed_count = max(
+        completed_count,
+        len(task_spec.normalize_completed_prefix(decision.completed_subtasks)),
+    )
+    if decision.current_subtask == task_spec.done_label:
+        return task_spec.done_index
+    return min(completed_count, task_spec.done_index)
+
+
 def _get_visualizer_step(environment) -> int:
     if environment.num_steps <= 0:
         return 0
@@ -1093,6 +1140,7 @@ def _run_replay_planner(args: Args, prompt: str) -> None:
 
 
 def _run_replay_hybrid(args: Args, prompt: str) -> None:
+    from examples.piper_real import hybrid_orchestrator as _hybrid_orchestrator
     from examples.piper_real import replay_env as _replay_env
     from examples.piper_real import (
         replay_manipulation_planner as _replay_manipulation_planner,
@@ -1148,19 +1196,6 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
         args,
         environment,
     )
-    subtask_list = _build_replay_subtask_list(
-        args,
-        prompt,
-        ordered_task_memory_runtime=ordered_task_memory_runtime,
-    )
-    if subtask_list is None:
-        logging.error(
-            "Replay hybrid exiting before execution at replay step %d/%d: subtask decomposition failed.",
-            environment.get_cursor(),
-            environment.num_steps,
-        )
-        environment.close()
-        return
 
     visualizer = _replay_visualizer.ReplayVisualizer(
         environment,
@@ -1192,170 +1227,51 @@ def _run_replay_hybrid(args: Args, prompt: str) -> None:
             )
         )
     )
-    completed_navigate = 0
-    completed_manipulate = 0
-    policy_steps = 0
-    prompt_queries = 0
     debug_export_dir = _resolve_replay_debug_export_dir(args)
 
-    def _log_hybrid_early_exit(
-        reason: str, *, subtask_index: int | None = None
-    ) -> None:
-        if subtask_index is None:
-            logging.error(
-                "Replay hybrid exiting early at replay step %d/%d: %s",
-                environment.get_cursor(),
-                environment.num_steps,
-                reason,
-            )
-            return
-
-        logging.error(
-            "Replay hybrid exiting early at replay step %d/%d during subtask %d/%d: %s",
-            environment.get_cursor(),
-            environment.num_steps,
-            subtask_index + 1,
-            len(subtask_list),
-            reason,
-        )
-
-    try:
-        for idx, subtask in enumerate(subtask_list):
-            logging.info(
-                "Executing replay subtask %d/%d [%s]: %s",
-                idx + 1,
-                len(subtask_list),
-                subtask.type,
-                subtask.prompt,
-            )
-            visualizer.set_subtask_context(
-                idx + 1, len(subtask_list), subtask.type, subtask.prompt
-            )
-
-            if subtask.type == "navigate":
-                if not on_nav_step(_get_visualizer_step(environment)):
-                    _log_hybrid_early_exit(
-                        "user aborted before navigation execution",
-                        subtask_index=idx,
-                    )
-                    logging.info(
-                        "Replay hybrid aborted by user before subtask %d/%d.",
-                        idx + 1,
-                        len(subtask_list),
-                    )
-                    return
-                completed_navigate += 1
-                logging.info(
-                    "Skipping navigate subtask %d/%d in replay mode: %s",
-                    idx + 1,
-                    len(subtask_list),
-                    subtask.prompt,
-                )
-                _mark_ordered_task_completed(
-                    ordered_task_memory_runtime,
-                    idx,
-                    reason=f"replay navigate subtask {idx + 1} skipped/succeeded",
-                )
-                continue
-
-            if args.navigation_only:
-                logging.info("Manipulate (skipped): %s", subtask.prompt)
-                continue
-
-            assert (
-                policy_agent is not None
-            ), "hybrid manipulate subtask requires a policy agent"
-            assert (
-                manipulation_planner is not None
-            ), "hybrid manipulate subtask requires a prompt replanner"
-            manipulation_result = _run_manipulation_subtask(
-                environment,
-                policy_agent,
-                manipulation_planner,
-                subtask_prompt=subtask.prompt,
-                max_steps=args.replay_manipulate_max_steps,
-                replan_interval_steps=args.replay_manipulate_replan_interval_steps,
-                progress_complete_threshold=args.planner.progress_complete_threshold,
-                progress_stall_threshold=args.planner.progress_stall_threshold,
-                progress_stall_steps=args.planner.progress_stall_steps,
-                progress_regression_threshold=args.planner.progress_regression_threshold,
-                progress_confirm_with_replanner=args.planner.progress_confirm_with_replanner,
-                progress_head_mode=args.progress_head_mode,
-                debug_export_dir=debug_export_dir,
-                subtask_index=idx + 1,
-                total_subtasks=len(subtask_list),
-                visualizer=visualizer,
-            )
-            executed_steps = int(manipulation_result["executed_steps"])
-            policy_steps += executed_steps
-            prompt_queries += int(manipulation_result["prompt_queries"])
-            if bool(manipulation_result.get("completed", False)):
-                completed_manipulate += 1
-                logging.info(
-                    "Replay manipulate subtask %d/%d completed after %d policy steps, "
-                    "%d prompt queries, at replay cursor %d/%d.",
-                    idx + 1,
-                    len(subtask_list),
-                    executed_steps,
-                    int(manipulation_result["prompt_queries"]),
-                    environment.get_cursor(),
-                    environment.num_steps,
-                )
-                _mark_ordered_task_completed(
-                    ordered_task_memory_runtime,
-                    idx,
-                    reason=f"replay manipulate subtask {idx + 1} completed",
-                )
-            else:
-                stop_reason = str(manipulation_result.get("stop_reason", "incomplete"))
-                if stop_reason == "replay_exhausted" and idx + 1 == len(subtask_list):
-                    logging.warning(
-                        "Replay dataset exhausted during final manipulate subtask %d/%d "
-                        "after %d policy steps with no explicit completion signal.",
-                        idx + 1,
-                        len(subtask_list),
-                        executed_steps,
-                    )
-                    break
-                _log_hybrid_early_exit(
-                    f"manipulate subtask did not complete ({stop_reason})",
-                    subtask_index=idx,
-                )
-                logging.error(
-                    "Replay manipulate subtask %d/%d did not complete after %d policy steps, "
-                    "%d prompt queries, at replay cursor %d/%d; stop_reason=%s",
-                    idx + 1,
-                    len(subtask_list),
-                    executed_steps,
-                    int(manipulation_result["prompt_queries"]),
-                    environment.get_cursor(),
-                    environment.num_steps,
-                    stop_reason,
-                )
-                return
-            if environment.is_episode_complete() and idx + 1 < len(subtask_list):
-                _log_hybrid_early_exit(
-                    "replay dataset exhausted with remaining subtasks",
-                    subtask_index=idx,
-                )
-                logging.error(
-                    "Replay dataset exhausted after subtask %d/%d; aborting remaining subtasks.",
-                    idx + 1,
-                    len(subtask_list),
-                )
-                return
-
+    def _log_summary(summary: _hybrid_orchestrator.HybridOrchestratorSummary) -> None:
         _log_hybrid_replay_summary(
             environment,
-            total_subtasks=len(subtask_list),
-            navigate_subtasks=completed_navigate,
-            manipulate_subtasks=completed_manipulate,
-            policy_steps=policy_steps,
-            prompt_queries=prompt_queries,
+            total_subtasks=summary.total_subtasks,
+            navigate_subtasks=summary.navigate_subtasks,
+            manipulate_subtasks=summary.manipulate_subtasks,
+            policy_steps=summary.policy_steps,
+            prompt_queries=summary.prompt_queries,
         )
-    finally:
-        visualizer.close()
-        environment.close()
+
+    backend = _hybrid_orchestrator.ReplayHybridBackend(
+        environment=environment,
+        policy_agent=policy_agent,
+        manipulation_planner=manipulation_planner,
+        ordered_task_memory_runtime=ordered_task_memory_runtime,
+        navigation_only=args.navigation_only,
+        summary_logger=_log_summary,
+        visualizer=visualizer,
+        on_nav_step=on_nav_step,
+    )
+    _hybrid_orchestrator.run_hybrid_orchestrator(
+        prompt=prompt,
+        backend=backend,
+        build_subtask_list=lambda task_prompt, ordered_task_memory_runtime=None: _build_replay_subtask_list(
+            args,
+            task_prompt,
+            ordered_task_memory_runtime=ordered_task_memory_runtime,
+        ),
+        run_manipulation_subtask=_run_manipulation_subtask,
+        manipulation_config=_hybrid_orchestrator.HybridManipulationConfig(
+            max_steps=args.replay_manipulate_max_steps,
+            replan_interval_steps=args.replay_manipulate_replan_interval_steps,
+            progress_complete_threshold=args.planner.progress_complete_threshold,
+            progress_stall_threshold=args.planner.progress_stall_threshold,
+            progress_stall_steps=args.planner.progress_stall_steps,
+            progress_regression_threshold=args.planner.progress_regression_threshold,
+            progress_confirm_with_replanner=args.planner.progress_confirm_with_replanner,
+            progress_head_mode=args.progress_head_mode,
+            debug_export_dir=debug_export_dir,
+        ),
+        mark_ordered_task_completed=_mark_ordered_task_completed,
+        get_ordered_completed_count=_get_replay_ordered_completed_count,
+    )
 
 
 def _log_real_hybrid_summary(
@@ -1392,6 +1308,7 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
 
     from examples.piper_real import base_safety as _base_safety
     from examples.piper_real import env as _env
+    from examples.piper_real import hybrid_orchestrator as _hybrid_orchestrator
     from examples.piper_real import logger as _logger
     from examples.piper_real import navigation_tool as _navigation_tool
     from examples.piper_real import (
@@ -1440,8 +1357,6 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
     if not _run_required_server_checks(args, needs_planner=True):
         return
 
-    # Step 1: Decompose task up-front so we know what (if anything) we need to
-    # spin up downstream.
     from examples.piper_real import task_decomposer as _task_decomposer
 
     decomposer = _task_decomposer.TaskDecomposer(args.planner)
@@ -1453,11 +1368,13 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
 
     has_navigate = any(s.type == "navigate" for s in subtask_list)
     has_manipulate = any(s.type == "manipulate" for s in subtask_list)
-    needs_server = has_manipulate and not args.navigation_only
-    needs_ros_environment = needs_server or (args.use_robot_base and has_navigate)
+    has_ordered_task_spec = bool(args.planner.task_spec_path.strip())
+    needs_server = (has_manipulate or has_ordered_task_spec) and not args.navigation_only
+    needs_ros_environment = needs_server or (
+        args.use_robot_base and (has_navigate or has_ordered_task_spec)
+    )
 
-    # Step 2: Safety confirmation (once, if base motion requested).
-    if args.use_robot_base and has_navigate:
+    if args.use_robot_base and (has_navigate or has_ordered_task_spec):
         if not _base_safety.confirm_base_motion_safety(
             prompt,
             use_llm_planner=True,
@@ -1467,7 +1384,6 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
             logging.error("Base motion aborted before execution.")
             return
 
-    # Step 3: Create pi0 connection + policy agent if needed.
     policy_agent = None
     reset_position = None
     if needs_server:
@@ -1476,7 +1392,6 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
         policy_agent = _create_policy_agent(args)
         reset_position = getattr(policy_agent, "policy_metadata", {}).get("reset_pose")
 
-    # Step 4: Create shared ROS environment if needed.
     environment = None
     if needs_ros_environment:
         if args.save_log and needs_server:
@@ -1492,9 +1407,6 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
         _restore_cli_logging()
         logging.info("Real hybrid ROS environment initialized.")
 
-    # Step 5: Initialize the real environment before any VLM frame read or
-    # policy action. Replay environments can read frame 0 directly; real
-    # hardware needs reset() to populate the initial timestep.
     if needs_server and environment is not None:
         environment.reset()
         _restore_cli_logging()
@@ -1503,14 +1415,14 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
             policy_agent.reset()
             logging.info("Real hybrid policy agent reset complete.")
 
-    # Step 6: Build ordered task memory + manipulation replanner (manipulate only).
     manipulation_planner = None
     ordered_task_memory_runtime = None
-    if needs_server and environment is not None:
+    if environment is not None:
         ordered_task_memory_runtime = _build_ordered_task_memory_runtime(
             args,
             environment,
         )
+    if needs_server and environment is not None:
         manipulation_planner = (
             _replay_manipulation_planner.ReplayManipulationPromptPlanner(
                 environment,
@@ -1524,12 +1436,6 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
             )
         )
         logging.info("Real hybrid manipulation replanner initialized.")
-
-    completed_navigate = 0
-    completed_manipulate = 0
-    policy_steps = 0
-    prompt_queries = 0
-    navigation_only_ran = False
 
     def _dump_nav_frame() -> None:
         if environment is None or not getattr(environment, "save_obs", False):
@@ -1562,144 +1468,56 @@ def _run_real_hybrid(args: Args, prompt: str) -> None:
             images, frame_id=environment.frame_cnt
         )
 
-    try:
-        for idx, subtask in enumerate(subtask_list):
-            logging.info(
-                "Executing subtask %d/%d [%s]: %s",
-                idx + 1,
-                len(subtask_list),
-                subtask.type,
-                subtask.prompt,
-            )
-
-            if subtask.type == "navigate":
-                if args.navigation_only and navigation_only_ran:
-                    logging.info(
-                        "Skipping additional navigate subtask %d/%d in navigation-only mode: %s",
-                        idx + 1,
-                        len(subtask_list),
-                        subtask.prompt,
-                    )
-                    continue
-
-                ros_operator = None if environment is None else environment.ros_operator
-                result = _navigation_tool.navigate(
-                    subtask.prompt,
-                    ros_operator,
-                    dry_run=not args.use_robot_base,
-                    frame_tick_callback=_dump_nav_frame,
-                )
-                if not result.ok:
-                    logging.error(
-                        "Navigation failed at subtask %d/%d: %s",
-                        idx + 1,
-                        len(subtask_list),
-                        result.error or "unknown error",
-                    )
-                    return
-                navigation_only_ran = True
-                completed_navigate += 1
-                logging.info(
-                    "Navigate subtask %d/%d succeeded via routine %s.",
-                    idx + 1,
-                    len(subtask_list),
-                    result.routine_name,
-                )
-                _mark_ordered_task_completed(
-                    ordered_task_memory_runtime,
-                    idx,
-                    reason=f"navigate subtask {idx + 1} succeeded",
-                )
-                continue
-
-            if args.navigation_only:
-                logging.info("Manipulate (skipped): %s", subtask.prompt)
-                continue
-
-            assert (
-                policy_agent is not None and manipulation_planner is not None
-                and environment is not None
-            ), "manipulate subtask requires pi0 policy agent + manipulation planner + env"
-
-            environment.set_prompt(subtask.prompt)
-            _refresh_environment_observation_cache(
-                environment,
-                context=f"manipulate subtask {idx + 1}/{len(subtask_list)}",
-            )
-            manipulation_result = _run_manipulation_subtask(
-                environment,
-                policy_agent,
-                manipulation_planner,
-                subtask_prompt=subtask.prompt,
-                max_steps=args.replay_manipulate_max_steps,
-                replan_interval_steps=args.replay_manipulate_replan_interval_steps,
-                progress_complete_threshold=args.planner.progress_complete_threshold,
-                progress_stall_threshold=args.planner.progress_stall_threshold,
-                progress_stall_steps=args.planner.progress_stall_steps,
-                progress_regression_threshold=args.planner.progress_regression_threshold,
-                progress_confirm_with_replanner=args.planner.progress_confirm_with_replanner,
-                progress_head_mode=args.progress_head_mode,
-                debug_export_dir="",
-                subtask_index=idx + 1,
-                total_subtasks=len(subtask_list),
-                visualizer=None,
-            )
-            executed_steps = int(manipulation_result["executed_steps"])
-            policy_steps += executed_steps
-            prompt_queries += int(manipulation_result["prompt_queries"])
-            if bool(manipulation_result.get("completed", False)):
-                completed_manipulate += 1
-                logging.info(
-                    "Manipulate subtask %d/%d completed after %d policy steps, "
-                    "%d prompt queries.",
-                    idx + 1,
-                    len(subtask_list),
-                    executed_steps,
-                    int(manipulation_result["prompt_queries"]),
-                )
-                _mark_ordered_task_completed(
-                    ordered_task_memory_runtime,
-                    idx,
-                    reason=f"manipulate subtask {idx + 1} completed",
-                )
-            else:
-                stop_reason = str(manipulation_result.get("stop_reason", "incomplete"))
-                logging.error(
-                    "Manipulate subtask %d/%d did not complete after %d policy steps, "
-                    "%d prompt queries; stop_reason=%s",
-                    idx + 1,
-                    len(subtask_list),
-                    executed_steps,
-                    int(manipulation_result["prompt_queries"]),
-                    stop_reason,
-                )
-                return
-
-        _log_real_hybrid_summary(
-            total_subtasks=len(subtask_list),
-            navigate_subtasks=completed_navigate,
-            manipulate_subtasks=completed_manipulate,
-            policy_steps=policy_steps,
-            prompt_queries=prompt_queries,
+    def _build_real_subtask_list(task_prompt: str, ordered_task_memory_runtime=None):
+        return _build_hybrid_subtask_list(
+            args,
+            task_prompt,
+            ordered_task_memory_runtime=ordered_task_memory_runtime,
+            log_label="Real",
         )
-    finally:
-        save_dir_for_stitch = None
-        if environment is not None:
-            if args.use_robot_base:
-                _base_safety.stop_base(environment.ros_operator)
-            if getattr(environment, "saver", None) is not None:
-                save_dir_for_stitch = environment.saver.save_dir
-            close = getattr(environment, "close", None)
-            if callable(close):
-                close()
-        if save_dir_for_stitch is not None:
-            try:
-                logging.info(
-                    "Stitching camera videos in %s ...", save_dir_for_stitch
-                )
-                _logger.stitch_camera_videos(save_dir_for_stitch)
-            except Exception as exc:  # noqa: BLE001
-                logging.warning("stitch_camera_videos failed: %s", exc)
+
+    def _log_summary(summary: _hybrid_orchestrator.HybridOrchestratorSummary) -> None:
+        _log_real_hybrid_summary(
+            total_subtasks=summary.total_subtasks,
+            navigate_subtasks=summary.navigate_subtasks,
+            manipulate_subtasks=summary.manipulate_subtasks,
+            policy_steps=summary.policy_steps,
+            prompt_queries=summary.prompt_queries,
+        )
+
+    backend = _hybrid_orchestrator.RealHybridBackend(
+        environment=environment,
+        policy_agent=policy_agent,
+        manipulation_planner=manipulation_planner,
+        ordered_task_memory_runtime=ordered_task_memory_runtime,
+        navigation_only=args.navigation_only,
+        summary_logger=_log_summary,
+        navigate_func=_navigation_tool.navigate,
+        use_robot_base=args.use_robot_base,
+        frame_tick_callback=_dump_nav_frame,
+        refresh_observation_cache=_refresh_environment_observation_cache,
+        stop_base=_base_safety.stop_base,
+        stitch_camera_videos=getattr(_logger, "stitch_camera_videos", None),
+    )
+    _hybrid_orchestrator.run_hybrid_orchestrator(
+        prompt=prompt,
+        backend=backend,
+        build_subtask_list=_build_real_subtask_list,
+        run_manipulation_subtask=_run_manipulation_subtask,
+        manipulation_config=_hybrid_orchestrator.HybridManipulationConfig(
+            max_steps=args.replay_manipulate_max_steps,
+            replan_interval_steps=args.replay_manipulate_replan_interval_steps,
+            progress_complete_threshold=args.planner.progress_complete_threshold,
+            progress_stall_threshold=args.planner.progress_stall_threshold,
+            progress_stall_steps=args.planner.progress_stall_steps,
+            progress_regression_threshold=args.planner.progress_regression_threshold,
+            progress_confirm_with_replanner=args.planner.progress_confirm_with_replanner,
+            progress_head_mode=args.progress_head_mode,
+            debug_export_dir="",
+        ),
+        initial_subtasks=subtask_list,
+        mark_ordered_task_completed=_mark_ordered_task_completed,
+    )
 
 
 def main(args: Args) -> None:
@@ -1749,11 +1567,8 @@ def main(args: Args) -> None:
         logging.error("--use-robot-base requires --use-llm-planner.")
         return
 
-    from examples.piper_real import base_safety as _base_safety
     from examples.piper_real import env as _env
     from examples.piper_real import logger as _logger
-    from examples.piper_real import navigation_tool as _navigation_tool
-    from examples.piper_real import task_decomposer as _task_decomposer
     from openpi_client.runtime import runtime as _runtime
 
     # ── Stationary manipulation (no LLM planner, or LLM planner with empty prompt) ──

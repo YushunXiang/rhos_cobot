@@ -31,7 +31,17 @@ PORT="${PORT:-$(_cfg pi0.port)}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$(_cfg pi0.local.cuda_visible_devices)}"
 DEFAULT_PROMPT="${DEFAULT_PROMPT:-}"
 RECORD="${RECORD:-0}"
+PROGRESS_SOURCE="${PROGRESS_SOURCE:-task}"
 UV_CMD="${UV_CMD:-uv}"
+
+case "$PROGRESS_SOURCE" in
+  task|subtask)
+    ;;
+  *)
+    echo "PROGRESS_SOURCE must be one of: task, subtask." >&2
+    exit 1
+    ;;
+esac
 
 print_usage() {
   cat <<EOF
@@ -54,6 +64,7 @@ Environment overrides:
   CUDA_VISIBLE_DEVICES GPU selection for OpenPI (default: $CUDA_VISIBLE_DEVICES)
   DEFAULT_PROMPT       Optional fallback prompt passed to serve_policy.py
   RECORD               Set to 1 to enable policy recording
+  PROGRESS_SOURCE      Progress head exposed as action["progress"]: task|subtask (default: $PROGRESS_SOURCE)
   UV_CMD               uv executable or absolute path (default: $UV_CMD)
 EOF
 }
@@ -193,11 +204,13 @@ run_server() {
     policy:checkpoint
     "--policy.config=$POLICY_CONFIG"
     "--policy.dir=$checkpoint_path"
+    "--policy.progress-source=$PROGRESS_SOURCE"
   )
 
   echo "OpenPI root: $OPENPI_ROOT"
   echo "Policy config: $POLICY_CONFIG"
   echo "Checkpoint: $checkpoint_path"
+  echo "Progress source: $PROGRESS_SOURCE"
   echo "Port: $PORT"
   echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 
@@ -267,6 +280,7 @@ for var_name in \
   PORT \
   DEFAULT_PROMPT \
   RECORD \
+  PROGRESS_SOURCE \
   UV_CMD; do
   if [[ -v "$var_name" ]]; then
     printf -v ENV_PREFIX '%s%s=%q ' "$ENV_PREFIX" "$var_name" "${!var_name}"
@@ -285,6 +299,7 @@ tmux new-session -d -s "$SESSION_NAME" "$TMUX_COMMAND"
 echo "Server starting in tmux session '$SESSION_NAME'."
 echo "Policy config: $POLICY_CONFIG"
 echo "Checkpoint: $CHECKPOINT_DIR"
+echo "Progress source: $PROGRESS_SOURCE"
 echo "Port: $PORT"
 echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 echo "To view logs: tmux attach -t $SESSION_NAME"

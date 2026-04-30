@@ -21,7 +21,7 @@ def test_navigate_runs_full_goal_routine(monkeypatch):
     sleep_calls: list[float] = []
     stop_calls: list[str] = []
 
-    def fake_navigate_to_goal(_ros_operator, goal, _config):
+    def fake_navigate_to_goal(_ros_operator, goal, _config, **_kwargs):
         goal_calls.append(goal)
         return navigation_tool.CoordinateNavigationResult(
             ok=True,
@@ -68,7 +68,7 @@ def test_navigate_resolves_goals_relative_to_origin(monkeypatch):
     ros_operator = FakeRosOperator(pose={"x": 1.0, "y": 2.0, "yaw": math.pi / 2.0})
     goal_calls: list[navigation_tool.NavigationGoal] = []
 
-    def fake_navigate_to_goal(_ros_operator, goal, _config):
+    def fake_navigate_to_goal(_ros_operator, goal, _config, **_kwargs):
         goal_calls.append(goal)
         return navigation_tool.CoordinateNavigationResult(
             ok=True, goal=goal, executed_steps=1
@@ -127,7 +127,7 @@ def test_navigate_stops_base_and_returns_failure_on_goal_error(monkeypatch):
     stop_calls: list[str] = []
     call_count = {"n": 0}
 
-    def fake_navigate_to_goal(_ros_operator, goal, _config):
+    def fake_navigate_to_goal(_ros_operator, goal, _config, **_kwargs):
         call_count["n"] += 1
         if call_count["n"] == 2:
             return navigation_tool.CoordinateNavigationResult(
