@@ -1,24 +1,30 @@
-# Run Aloha (Real Robot)
+# Piper Real Deploy Flow
 
-This example demonstrates how to run with a real robot using an [ALOHA setup](https://github.com/tonyzhaozh/aloha). See [here](../../docs/remote_inference.md) for instructions on how to load checkpoints and run inference. We list the relevant checkpoint paths for each provided fine-tuned model below.
+This example runs the real-robot deploy path for `examples/piper_real/main.py`.
 
-## Prerequisites
+The flow is now decomposition-first:
 
-This repo uses a fork of the ALOHA repo, with very minor modifications to use Realsense cameras.
+1. Build `PiperRealEnvironment` and connect to the OpenPI policy server only when a manipulate subtask exists.
+2. If `--use-llm-planner` is enabled and `--prompt` is non-empty, send the full task prompt to the planner service and get back ordered `navigate` / `manipulate` subtasks.
+3. Execute each `navigate` subtask by calling `examples.piper_real.navigation_tool.navigate(...)`, which drives the base through a fixed sequence of body-frame coordinate goals using odometry feedback (same semantics as `scripts/run_tracer_demo_sequence_3term.sh`).
+4. Execute each `manipulate` subtask with the existing OpenPI Runtime path.
 
-1. Follow the [hardware installation instructions](https://github.com/tonyzhaozh/aloha?tab=readme-ov-file#hardware-installation) in the ALOHA repo.
-1. Modify the `third_party/aloha/aloha_scripts/realsense_publisher.py` file to use serial numbers for your cameras.
+## Safety
 
-## With Docker
+Before implementation, bring-up, or deploy validation, review the local manual:
 
-```bash
-export SERVER_ARGS="--env ALOHA --default_prompt='take the toast out of the toaster'"
-docker compose -f examples/aloha_real/compose.yml up --build
-```
+- `docs/tracer-2.0-user-manual-v2.0.3-2023.09.pdf`
 
-## Without Docker
+Any run that can move the TRACER base now requires explicit operator confirmation before motion begins. This applies to both `--use-llm-planner` and `--use-robot-base`.
 
-Terminal window 1:
+Shared constraints:
+
+- Use only in a clear visible area.
+- Verify both emergency stops are released.
+- Keep battery voltage above the manual warning threshold of 22.5V.
+- Do not exceed the configured velocity limits; startup rejects limits above the manual maximums of `1.8 m/s` linear and `1.0 rad/s` angular.
+
+## Python Environment
 
 ```bash
 # Source your ROS environment first.
@@ -44,96 +50,103 @@ UV_PROJECT_ENVIRONMENT=examples/piper_real/.venv-uv uv run --project examples/pi
 
 `pyproject.toml` is now the source of truth for Python dependencies in this example. The legacy `requirements.in` and `requirements.txt` files are kept only for reference. See [`UV_MIGRATION.md`](./UV_MIGRATION.md) for the cross-machine migration workflow.
 
-Terminal window 2:
+## Robot Workstation Setup
 
 ```bash
-roslaunch --wait aloha ros_nodes.launch
+sh scripts/init.sh
+conda activate aloha
+init_deploy
+roslaunch piper start_ms_piper.launch mode:=1 auto_enable:=true
+UV_PROJECT_ENVIRONMENT=examples/piper_real/.venv-uv uv run --project examples/piper_real python examples/piper_real/main.py
 ```
 
-Terminal window 3:
+Before running this example, bring up the TRACER base bridge that publishes `/odom_raw`, consumes `/cmd_vel`, and keeps the lower-level CAN control alive within the platform's 500ms command timeout. If you use the official AgileX stack, the CAN side should match the manual's `gs_usb` + `can0` 500k setup and command-mode requirements.
+
+## Local Planner Service
+
+Start a local OpenAI-compatible multimodal planner service before launching the runtime.
+
+For the default planner configuration in this repo, start the remote vLLM service with:
 
 ```bash
-uv run scripts/serve_policy.py --env ALOHA --default_prompt='take the toast out of the toaster'
+bash scripts/start_vllm_server.sh
 ```
 
-## **ALOHA Checkpoint Guide**
+This connects to `web@192.168.3.123`, starts `vllm serve` inside a remote `tmux` session, and serves `Qwen/Qwen3.5-4B` at the default planner endpoint `http://192.168.3.123:8000/v1`.
 
+Minimum requirements:
 
-The `pi0_base` model can be used in zero shot for a simple task on the ALOHA platform, and we additionally provide two example fine-tuned checkpoints, “fold the towel” and “open the tupperware and put the food on the plate,” which can perform more advanced tasks on the ALOHA.
+- Accepts text chat-completions requests for task decomposition.
+- Accepts replay manipulation replanning requests when `REPLAY_MODE=hybrid`.
+- Returns JSON-only planner responses.
+- Is reachable from the robot workstation at the configured `--planner.base-url`.
 
-While we’ve found the policies to work in unseen conditions across multiple ALOHA stations, we provide some pointers here on how best to set up scenes to maximize the chance of policy success. We cover the prompts to use for the policies, objects we’ve seen it work well on, and well-represented initial state distributions. Running these policies in zero shot is still a very experimental feature, and there is no guarantee that they will work on your robot. The recommended way to use `pi0_base` is by finetuning with data from the target robot.
+In live deploy and `REPLAY_MODE=hybrid`, the planner does not execute navigation motions. It only returns ordered `navigate` / `manipulate` subtasks; each `navigate` subtask is then executed by the shared local navigation tool.
 
+The planner must return this shape:
 
----
+```json
+{
+  "subtasks": [
+    {"type": "navigate", "prompt": "move to the table"},
+    {"type": "manipulate", "prompt": "pick up the red cup"}
+  ]
+}
+```
 
-### **Toast Task**  
+## Run Decomposition + Navigation Tool
 
-This task involves the robot taking two pieces of toast out of a toaster and placing them on a plate.  
+```bash
+python -m examples.piper_real.main \
+  --use-llm-planner \
+  --use-robot-base \
+  --prompt "移动到桌子旁边拿起红色杯子" \
+  --planner.base-url http://192.168.3.123:8000/v1 \
+  --planner.model Qwen/Qwen3.5-4B
+```
 
-- **Checkpoint path**: `s3://openpi-assets/checkpoints/pi0_base`
-- **Prompt**: "take the toast out of the toaster"
-- **Objects needed**: Two pieces of toast, a plate, and a standard toaster.  
-- **Object Distribution**:  
-  - Works on both real toast and rubber fake toast  
-  - Compatible with standard 2-slice toasters  
-  - Works with plates of varying colors  
+Runtime behavior:
 
-### **Scene Setup Guidelines**
-<img width="500" alt="Screenshot 2025-01-31 at 10 06 02 PM" src="https://github.com/user-attachments/assets/3d043d95-9d1c-4dda-9991-e63cae61e02e" />
+- A safety warning is shown before navigation starts.
+- The operator must type `yes` to allow base motion.
+- Each navigate subtask invokes the shared navigation tool.
+- In v1, every navigate prompt runs the same fixed `default_demo` routine.
+- Manipulation starts only after the navigate subtask returns success.
 
-- The toaster should be positioned in the top-left quadrant of the workspace.  
-- Both pieces of toast should start inside the toaster, with at least 1 cm of bread sticking out from the top.  
-- The plate should be placed roughly in the lower-center of the workspace.  
-- Works with both natural and synthetic lighting, but avoid making the scene too dark (e.g., don't place the setup inside an enclosed space or under a curtain).  
+## Skip Navigation
 
+```bash
+python -m examples.piper_real.main \
+  --prompt "拿起红色杯子"
+```
 
-### **Towel Task**  
+This path skips chassis movement, reports `navigation skipped`, and starts manipulation directly.
 
-This task involves folding a small towel (e.g., roughly the size of a hand towel) into eighths.
+## Dry-Run Navigation
 
-- **Checkpoint path**: `s3://openpi-assets/checkpoints/pi0_aloha_towel`
-- **Prompt**: "fold the towel"  
-- **Object Distribution**:  
-  - Works on towels of varying solid colors 
-  - Performance is worse on heavily textured or striped towels 
+```bash
+python -m examples.piper_real.main \
+  --use-llm-planner \
+  --prompt "移动到桌子旁边拿起红色杯子" \
+  --planner.base-url http://192.168.3.123:8000/v1 \
+  --planner.model Qwen/Qwen3.5-4B
+```
 
-### **Scene Setup Guidelines**  
-<img width="500" alt="Screenshot 2025-01-31 at 10 01 15 PM" src="https://github.com/user-attachments/assets/9410090c-467d-4a9c-ac76-96e5b4d00943" />
+This runs navigate subtasks through the same tool path but without publishing real base motion. Add `--use-robot-base` to execute the fixed routine on the robot.
 
-- The towel should be flattened and roughly centered on the table.  
-- Choose a towel that does not blend in with the table surface.  
+## Validation
 
+During bring-up, use:
 
-### **Tupperware Task**  
+```bash
+rostopic echo /cmd_vel
+rostopic echo /odom_raw
+```
 
-This task involves opening a tupperware filled with food and pouring the contents onto a plate.  
+Confirm all of the following:
 
-- **Checkpoint path**: `s3://openpi-assets/checkpoints/pi0_aloha_tupperware`
-- **Prompt**: "open the tupperware and put the food on the plate"
-- **Objects needed**: Tupperware, food (or food-like items), and a plate.  
-- **Object Distribution**:  
-  - Works on various types of fake food (e.g., fake chicken nuggets, fries, and fried chicken).  
-  - Compatible with tupperware of different lid colors and shapes, with best performance on square tupperware with a corner flap (see images below).  
-  - The policy has seen plates of varying solid colors.  
-
-### **Scene Setup Guidelines** 
-<img width="500" alt="Screenshot 2025-01-31 at 10 02 27 PM" src="https://github.com/user-attachments/assets/60fc1de0-2d64-4076-b903-f427e5e9d1bf" />
-
-- Best performance observed when both the tupperware and plate are roughly centered in the workspace.  
-- Positioning:  
-  - Tupperware should be on the left.  
-  - Plate should be on the right or bottom.  
-  - The tupperware flap should point toward the plate.  
-
-## Training on your own Aloha dataset
-
-1. Convert the dataset to the LeRobot dataset v2.0 format. 
-    
-    We provide a script [convert_aloha_data_to_lerobot.py](./convert_piper_data_to_lerobot.py) that converts the dataset to the LeRobot dataset v2.0 format. As an example we have converted the `aloha_pen_uncap_diverse_raw` dataset from the [BiPlay repo](https://huggingface.co/datasets/oier-mees/BiPlay/tree/main/aloha_pen_uncap_diverse_raw) and uploaded it to the HuggingFace Hub as [physical-intelligence/aloha_pen_uncap_diverse](https://huggingface.co/datasets/physical-intelligence/aloha_pen_uncap_diverse). 
-
-
-2. Define a training config that uses the custom dataset. 
-
-    We provide the [pi0_aloha_pen_uncap config](../../src/openpi/training/config.py) as an example. You should refer to the root [README](../../README.md) for how to run training with the new config.
- 
-IMPORTANT: Our base checkpoint includes normalization stats from various common robot configurations. When fine-tuning a base checkpoint with a custom dataset from one of these configurations, we recommend using the corresponding normalization stats provided in the base checkpoint. In the example, this is done by specifying the trossen asset_id and a path to the pretrained checkpoint’s asset directory within the AssetsConfig.
+- Navigation publishes `/cmd_vel` before arm manipulation starts.
+- The base returns to zero velocity between routine steps and on shutdown.
+- Task decomposition is logged before subtask execution starts.
+- Navigation tool logs show the prompt, selected routine, and each fixed step.
+- Navigation failure prevents `Runtime.run()` from starting.

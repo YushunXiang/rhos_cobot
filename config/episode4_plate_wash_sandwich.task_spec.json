@@ -1,0 +1,17 @@
+{
+  "name": "episode4_plate_wash_sandwich",
+  "total_task": "Complete this long-horizon task in the exact order below. Phase 1, dish washing: pick up the center plate, turn on the faucet, wash the plate, turn off the faucet, and return the plate to its original position. Phase 2, transition: move from the sink area to the plate area. Phase 3, sandwich assembly: place the first bread slice on the center plate, place the lettuce on top of the bread on the center plate, and place the second bread slice on top of the lettuce. Do not skip, reorder, or revisit earlier subtasks unless the visual evidence clearly shows the current stage estimate is wrong.",
+  "subtasks": [
+    "Pick up the center plate",
+    "Turn on the faucet",
+    "Wash the plate",
+    "Turn off the faucet",
+    "Return the plate to its original position",
+    "Move from the sink area to the plate area",
+    "Place the first bread slice on the center plate",
+    "Place the lettuce on top of the bread on the center plate",
+    "Place the second bread slice on top of the lettuce"
+  ],
+  "done_label": "Task completed",
+  "uncertain_label": "Unable to determine"
+}
