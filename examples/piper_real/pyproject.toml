@@ -1,0 +1,36 @@
+[project]
+name = "piper-real"
+version = "0.1.0"
+description = "uv-managed dependencies for the Piper real robot example."
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "dm-control==1.0.30",
+    "dm-env==1.6",
+    "einops==0.8.1",
+    "h5py==3.13.0",
+    "matplotlib==3.10.3",
+    "modern-robotics==1.1.1",
+    "msgpack==1.1.0",
+    "numpy==1.26.4",
+    "opencv-python==4.11.0.86",
+    "openpi-client",
+    "packaging==25.0",
+    "pandas==2.2.3",
+    "pexpect==4.9.0",
+    "pillow==11.2.1",
+    "pyquaternion==0.9.9",
+    "pyyaml==6.0.2",
+    "requests==2.32.3",
+    "rospkg==1.6.0",
+    "torch==2.7.0",
+    "tyro==0.9.20",
+    "typing-extensions==4.15.0",
+    "websockets==15.0.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+openpi-client = { git = "ssh://git@gitee.com/yuz1wan/cobot_magic.git", rev = "38460abc713af469c33664921f13e1800c99a413", subdirectory = "openpi/packages/openpi-client" }

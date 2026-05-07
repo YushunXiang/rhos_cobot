@@ -10,7 +10,11 @@ import torch
 
 from threading import Thread
 from examples.piper_real import base_safety
-from examples.piper_real import ros_oper as _ros_oper
+
+try:
+    from examples.piper_real import ros_oper as _ros_oper
+except ModuleNotFoundError:
+    import ros_oper as _ros_oper
 
 #this is  a camera name list for config
 CAMERA_NAMES = ['cam_high', 'cam_right_wrist', 'cam_left_wrist']

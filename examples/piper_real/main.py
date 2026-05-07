@@ -11,13 +11,22 @@ import re
 import textwrap
 import time
 
+import tyro
+
+try:
+    from examples.piper_real import qt_env as _qt_env
+except ModuleNotFoundError:
+    import qt_env as _qt_env
+
+# Before env (cv2) / matplotlib Qt: avoid OpenCV's cv2/qt/plugins shadowing PySide6 xcb.
+_qt_env.fix_qt_for_matplotlib()
+
 import cv2
 import numpy as np
 
-import tyro
-
 from openpi_client import action_chunk_broker
 from openpi_client import websocket_client_policy as _websocket_client_policy
+from openpi_client.runtime import subscriber as _subscriber
 from openpi_client.runtime.agents import policy_agent as _policy_agent
 from examples.piper_real.planner_config import PlannerConfig
 
@@ -113,6 +122,56 @@ class Args:
         1.0  # Relative replay visualization speed (1.0 = dataset FPS)
     )
     planner: PlannerConfig = dataclasses.field(default_factory=PlannerConfig)
+
+    # If True: each step logs policy progress/task_progress/subtask_progress when present.
+    log_progress: bool = False
+
+    # Matplotlib live plot (task + subtask); set DISPLAY or SSH -X.
+    plot_progress: bool = False
+    plot_progress_window: int = 500
+    plot_progress_update_every: int = 1
+
+
+class _ProgressLogSubscriber(_subscriber.Subscriber):
+    def on_episode_start(self) -> None:
+        return
+
+    def on_episode_end(self) -> None:
+        return
+
+    def on_step(self, observation: dict, action: dict) -> None:
+        # ROS may reconfigure logging after node startup; print keeps step progress visible.
+        print(f"on_step action keys={sorted(action.keys())}", flush=True)
+        for key in ("progress", "task_progress", "subtask_progress"):
+            if key not in action:
+                continue
+            if action[key] is not None:
+                print(f"policy {key} = {action[key]}", flush=True)
+            else:
+                print(
+                    f"policy {key} key present but filtered (None); repr={action.get(key)!r}",
+                    flush=True,
+                )
+
+
+def _build_progress_subscribers(args: Args) -> list[_subscriber.Subscriber]:
+    logging.info("log_progress=%s", args.log_progress)
+    subscribers: list[_subscriber.Subscriber] = []
+    if args.log_progress:
+        subscribers.append(_ProgressLogSubscriber())
+    if args.plot_progress:
+        try:
+            from examples.piper_real import progress_plot as _progress_plot
+        except ModuleNotFoundError:
+            import progress_plot as _progress_plot
+
+        subscribers.append(
+            _progress_plot.DualProgressPlotSubscriber(
+                window=args.plot_progress_window,
+                update_every=args.plot_progress_update_every,
+            )
+        )
+    return subscribers
 
 
 def _create_policy_agent(args: Args) -> _policy_agent.PolicyAgent:
@@ -1592,6 +1651,7 @@ def main(args: Args) -> None:
             _logger.InputJointStateLogger()
             _logger.OutputJointStateLogger()
 
+        subscribers = _build_progress_subscribers(args)
         environment = _env.PiperRealEnvironment(
             reset_position=metadata.get("reset_pose"),
             prompt=args.prompt,
@@ -1607,11 +1667,12 @@ def main(args: Args) -> None:
                     action_horizon=args.action_horizon,
                 )
             ),
-            subscribers=[],
+            subscribers=subscribers,
             max_hz=50,
             num_episodes=args.num_episodes,
             max_episode_steps=args.max_episode_steps,
         )
+        _restore_cli_logging()
         runtime.run()
         return
 

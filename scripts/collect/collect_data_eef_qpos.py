@@ -60,7 +60,7 @@ def get_arguments():
     # collect depth image
     # parser.add_argument('--use_depth_image', action='store_true', help='use_depth_image')
     parser.add_argument('--use_depth_image', type=bool, help='use_depth_image',
-                        default=True, required=False)
+                        default=False, required=False)
 
     parser.add_argument('--frame_rate', action='store', type=int, help='frame_rate',
                         default=25, required=False)

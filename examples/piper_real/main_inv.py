@@ -11,8 +11,13 @@ from openpi_client import action_chunk_broker
 from openpi_client import websocket_client_policy as _websocket_client_policy
 from openpi_client.runtime import runtime as _runtime
 from openpi_client.runtime.agents import policy_agent as _policy_agent
-from examples.piper_real import env_inv as _env
-from examples.piper_real import logger as _logger
+
+try:
+    from examples.piper_real import env_inv as _env
+    from examples.piper_real import logger as _logger
+except ModuleNotFoundError:
+    import env_inv as _env
+    import logger as _logger
 
 
 @dataclasses.dataclass

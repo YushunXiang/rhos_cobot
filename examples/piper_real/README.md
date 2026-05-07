@@ -27,13 +27,28 @@ Shared constraints:
 ## Python Environment
 
 ```bash
-uv venv --python 3.11 examples/piper_real/.venv
-source examples/piper_real/.venv/bin/activate
-uv pip compile examples/piper_real/requirements.in -o examples/piper_real/requirements.txt --python-version 3.11
-uv pip sync examples/piper_real/requirements.txt
+# Source your ROS environment first.
+source /opt/ros/<distro>/setup.bash
+
+# Create a separate uv-managed environment for this example.
+cd examples/piper_real
+uv python install 3.10.18
+UV_PROJECT_ENVIRONMENT=.venv-uv uv sync --python 3.10.18
+
+# Run the robot.
+UV_PROJECT_ENVIRONMENT=.venv-uv uv run python main.py
 ```
 
-`examples/piper_real/main.py` imports `openpi_client`. This repository snapshot does not contain `packages/openpi-client`, so use the existing deploy environment that already provides `openpi_client` on `PYTHONPATH` or in the active interpreter.
+If you prefer to stay in the repo root, the equivalent command is:
+
+```bash
+source /opt/ros/<distro>/setup.bash
+uv python install 3.10.18
+UV_PROJECT_ENVIRONMENT=examples/piper_real/.venv-uv uv sync --project examples/piper_real --python 3.10.18
+UV_PROJECT_ENVIRONMENT=examples/piper_real/.venv-uv uv run --project examples/piper_real python examples/piper_real/main.py
+```
+
+`pyproject.toml` is now the source of truth for Python dependencies in this example. The legacy `requirements.in` and `requirements.txt` files are kept only for reference. See [`UV_MIGRATION.md`](./UV_MIGRATION.md) for the cross-machine migration workflow.
 
 ## Robot Workstation Setup
 
@@ -42,7 +57,7 @@ sh scripts/init.sh
 conda activate aloha
 init_deploy
 roslaunch piper start_ms_piper.launch mode:=1 auto_enable:=true
-source examples/piper_real/.venv/bin/activate
+UV_PROJECT_ENVIRONMENT=examples/piper_real/.venv-uv uv run --project examples/piper_real python examples/piper_real/main.py
 ```
 
 Before running this example, bring up the TRACER base bridge that publishes `/odom_raw`, consumes `/cmd_vel`, and keeps the lower-level CAN control alive within the platform's 500ms command timeout. If you use the official AgileX stack, the CAN side should match the manual's `gs_usb` + `can0` 500k setup and command-mode requirements.

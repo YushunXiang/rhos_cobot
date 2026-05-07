@@ -59,6 +59,28 @@ python -m scripts.post_collect.visualize_episodes --dataset_dir ./data/ --task_n
 ```
 该脚本会在指定的目录下生成可视化结果，包括视频、关节角度图像等。请仔细观察是否存在视频数据损坏、关节角度记录异常（如左右臂数据明显颠倒）、末端执行器数据异常等问题。
 
+## 2.1 Stage 网页复核
+对于新增 `stage`、缺失 `stage` 或者怀疑录制时漏按 `space` 的数据，可以启动本地网页进行人工复核与修正。该工具会读取指定目录下的 `episode_*.hdf5`，显示相机画面、时间轴和阶段切换点；默认把修正结果写到 `fixed_stage/` 副本，也可以显式开启覆盖原文件。
+
+```bash
+# 默认：保存到 <dataset_dir>/fixed_stage/
+python -m scripts.post_collect.review_stage_web --dataset_dir ./ocl_data/pick_bread_leaf
+
+# 如需允许直接覆盖原始 HDF5，再显式加开关
+python -m scripts.post_collect.review_stage_web --dataset_dir ./ocl_data/pick_bread_leaf --allow_overwrite
+```
+
+打开浏览器访问脚本启动时打印的地址，推荐先筛选异常 episode：
+- `missing_stage`：源文件没有 `/stage` dataset
+- `all_zero_stage`：整段都还是 stage 0，常见于漏按 `space`
+- `missing_qpos` / `empty_images_group`：结构不完整，仅允许查看，不允许保存
+
+网页内支持：
+- 拖动时间轴边界调整阶段切换点
+- 按区间批量重写 stage
+- 修改当前 segment 的 stage 值
+- 保存到 `fixed_stage/episode_xxx.hdf5`，并在下次打开时优先读取 fixed 副本继续编辑
+
 ## 3. 重播数据（可选）
 在可视化检查通过后，可以使用以下脚本重播数据，验证数据的完整性和正确性。  
 ⚠️Warning⚠️  运行重播前请确保：  
