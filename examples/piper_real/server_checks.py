@@ -55,6 +55,12 @@ def check_planner_server(
     except urllib.error.URLError as exc:
         raise ServerCheckError(f"planner check failed for {models_url}: {exc}") from exc
 
+    if not isinstance(payload, dict):
+        raise ServerCheckError(
+            f"planner check failed for {models_url}: expected JSON object, "
+            f"got {type(payload).__name__}"
+        )
+
     models = tuple(
         item.get("id", "")
         for item in payload.get("data", [])

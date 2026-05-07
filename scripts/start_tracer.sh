@@ -2,6 +2,11 @@
 
 echo "=== 准备启动 ROS 系统及驱动 ==="
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_ROOT=${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}
+VENV_ACTIVATE=${VENV_ACTIVATE:-"${PROJECT_ROOT}/examples/piper_real/.venv/bin/activate"}
+TRACER_SCRIPT_DIR="${PROJECT_ROOT}/scripts/tracer"
+
 # 1. 启动 roscore
 echo ">>> [1/4] 启动 roscore..."
 gnome-terminal --title="roscore" -- bash -c "roscore; exec bash"
@@ -18,11 +23,10 @@ gnome-terminal --title="tracer_driver" -- bash -c "cd ~/catkin_ws/src && roslaun
 sleep 4  # 暂停 4 秒，等待 CAN 通讯建立
 
 # 4. 激活虚拟环境并运行 Python 控制脚本
-# 使用绝对路径，确保在任何目录下执行该脚本都能成功 cd 到目标文件夹
 echo ">>> [4/4] 启动 tracer_demo.py 控制脚本..."
 gnome-terminal --title="tracer_demo" -- bash -c "
-source /home/agilex/rhos_cobot-001-llm-navigation-stage/examples/piper_real/.venv/bin/activate && 
-cd /home/agilex/rhos_cobot-001-llm-navigation-stage/scripts/tracer && 
+source '${VENV_ACTIVATE}' && 
+cd '${TRACER_SCRIPT_DIR}' && 
 python tracer_demo.py; 
 exec bash"
 

@@ -23,8 +23,9 @@ CMD_VEL_TOPIC="/cmd_vel"
 MAX_LINEAR="0.15"
 MAX_ANGULAR="0.30"
 
-PROJECT_ROOT="/home/agilex/rhos_cobot-001-llm-navigation-stage"
-VENV_PATH="${PROJECT_ROOT}/.venv/bin/activate"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_ROOT=${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}
+VENV_PATH=${VENV_PATH:-"${PROJECT_ROOT}/.venv/bin/activate"}
 SCRIPT_PATH="${PROJECT_ROOT}/scripts/tracer/tracer_demo_coordinates.py"
 
 echo "=== TRACER coordinate test launcher ==="

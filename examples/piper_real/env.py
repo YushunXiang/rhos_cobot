@@ -175,7 +175,13 @@ class PiperRealEnvironment(_environment.Environment):
         print(f"STOP_SIGNAL: {stop_flag}")
         if "actions" in action:
             raw = action["actions"]
-            truncated = raw[:14] if len(raw) > 14 else raw
+            raw_array = np.asarray(raw)
+            if raw_array.ndim == 0:
+                truncated = raw_array
+            elif raw_array.ndim == 1:
+                truncated = raw_array[:14]
+            else:
+                truncated = raw_array[0, :14]
             self._ts = self._env.step(truncated, STOP=stop_flag)
         else:
             self._ts = self._env.step(None, STOP=stop_flag)

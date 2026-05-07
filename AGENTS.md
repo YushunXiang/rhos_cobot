@@ -15,7 +15,13 @@ tests/
 
 ## Commands
 
-cd src [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECHNOLOGIES] pytest [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECHNOLOGIES] ruff check .
+```bash
+python -m scripts.collect.collect_data_eef_qpos --dataset_dir=./data --task_name <name> --max_timesteps 2500 --episode_idx <idx>
+python -m scripts.post_collect.check_joints --dataset_dir ./data/ --data_key qpos
+python -m examples.piper_real.main
+PYTHONPATH=../openpi/packages/openpi-client/src ../openpi/.venv/bin/python -m pytest tests/test_replay_env.py
+ruff check .
+```
 
 ## Code Style
 

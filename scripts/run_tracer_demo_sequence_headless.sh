@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # ========= 配置 =========
-VENV_ACTIVATE="/home/agilex/rhos_cobot-001-llm-navigation-stage/examples/piper_real/.venv/bin/activate"
-PROJECT_ROOT="/home/agilex/rhos_cobot-001-llm-navigation-stage"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_ROOT=${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}
+VENV_ACTIVATE=${VENV_ACTIVATE:-"${PROJECT_ROOT}/examples/piper_real/.venv/bin/activate"}
 SCRIPT_PATH="${PROJECT_ROOT}/scripts/tracer/tracer_demo_coordinates.py"
 
 LOG_DIR="${PROJECT_ROOT}/logs/tracer_demo"

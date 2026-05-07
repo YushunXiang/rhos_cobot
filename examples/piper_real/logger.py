@@ -326,9 +326,10 @@ def stitch_camera_videos(
     hstack_cmd = [ffmpeg, "-y"]
     for cam in cam_names:
         hstack_cmd += ["-i", per_cam_mp4s[cam]]
+    hstack_inputs = "".join(f"[{idx}:v]" for idx in range(len(cam_names)))
     hstack_cmd += [
         "-filter_complex",
-        f"[0:v][1:v][2:v]hstack=inputs={len(cam_names)}",
+        f"{hstack_inputs}hstack=inputs={len(cam_names)}",
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         combined,
@@ -340,7 +341,11 @@ def stitch_camera_videos(
             result.stderr.strip().splitlines()[-1] if result.stderr else "<no stderr>",
         )
         return
-    logging.info("stitch_camera_videos: wrote combined 3-view video %s", combined)
+    logging.info(
+        "stitch_camera_videos: wrote combined %d-view video %s",
+        len(cam_names),
+        combined,
+    )
 
 
 # main:设置参数，根据参数选择需要记录的logger,并启动logger,参数包括 input,output,img,all

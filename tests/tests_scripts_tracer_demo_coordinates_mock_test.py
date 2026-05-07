@@ -4,8 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-# 按你的实际文件位置改这里的 import 路径
-# 假设 tracer_demo_coordinates.py 在 scripts/tracer/
+# tracer_demo_coordinates.py is expected to live in scripts/tracer/.
 from scripts.tracer import tracer_demo_coordinates as demo
 
 
@@ -18,7 +17,7 @@ class FakePublisher:
 
 
 class FakeTwist:
-    # Fake massage
+    # Fake message
     class _Linear:
         def __init__(self):
             self.x = 0.0
