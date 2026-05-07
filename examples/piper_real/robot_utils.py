@@ -13,7 +13,10 @@ import numpy as np
 import rospy
 from sensor_msgs.msg import JointState,Image
 
-from examples.piper_real import constants
+try:
+    from examples.piper_real import constants
+except ModuleNotFoundError:
+    import constants
 
 
 class ImageRecorder:

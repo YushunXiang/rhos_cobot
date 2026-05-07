@@ -21,18 +21,28 @@ docker compose -f examples/aloha_real/compose.yml up --build
 Terminal window 1:
 
 ```bash
-# All cmd run in openpi path:
-# Create virtual environment
-uv venv --python 3.11 examples/piper_real/.venv
-source examples/piper_real/.venv/bin/activate
-# generate requirement.txt
-uv pip compile examples/piper_real/requirements.in -o examples/piper_real/requirements.txt --python-version 3.11
-uv pip sync examples/piper_real/requirements.txt
-uv pip install -e packages/openpi-client
+# Source your ROS environment first.
+source /opt/ros/<distro>/setup.bash
 
-# Run the robot
-python examples/aloha_real/main.py
+# Create a separate uv-managed environment for this example.
+cd examples/piper_real
+uv python install 3.10.18
+UV_PROJECT_ENVIRONMENT=.venv-uv uv sync --python 3.10.18
+
+# Run the robot.
+UV_PROJECT_ENVIRONMENT=.venv-uv uv run python main.py
 ```
+
+If you prefer to stay in the repo root, the equivalent command is:
+
+```bash
+source /opt/ros/<distro>/setup.bash
+uv python install 3.10.18
+UV_PROJECT_ENVIRONMENT=examples/piper_real/.venv-uv uv sync --project examples/piper_real --python 3.10.18
+UV_PROJECT_ENVIRONMENT=examples/piper_real/.venv-uv uv run --project examples/piper_real python examples/piper_real/main.py
+```
+
+`pyproject.toml` is now the source of truth for Python dependencies in this example. The legacy `requirements.in` and `requirements.txt` files are kept only for reference. See [`UV_MIGRATION.md`](./UV_MIGRATION.md) for the cross-machine migration workflow.
 
 Terminal window 2:
 

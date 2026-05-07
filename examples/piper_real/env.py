@@ -6,8 +6,12 @@ from openpi_client import image_tools
 from openpi_client.runtime import environment as _environment
 from typing_extensions import override
 
-from examples.piper_real import real_env as _real_env
-from examples.piper_real.logger import ModelInputObservationSaver as _obs_saver
+try:
+    from examples.piper_real import real_env as _real_env
+    from examples.piper_real.logger import ModelInputObservationSaver as _obs_saver
+except ModuleNotFoundError:
+    import real_env as _real_env
+    from logger import ModelInputObservationSaver as _obs_saver
 
 
 class PiperRealEnvironment(_environment.Environment):
