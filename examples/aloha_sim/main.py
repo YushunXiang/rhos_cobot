@@ -4,9 +4,9 @@ import pathlib
 
 import env as _env
 from openpi_client import action_chunk_broker
-from openpi_client import websocket_client_policy as _websocket_client_policy
 from openpi_client.runtime import runtime as _runtime
 from openpi_client.runtime.agents import policy_agent as _policy_agent
+from rhos_cobot.openpi_remote_policy import create_resettable_websocket_policy
 import saver as _saver
 import tyro
 
@@ -34,7 +34,7 @@ def main(args: Args) -> None:
         ),
         agent=_policy_agent.PolicyAgent(
             policy=action_chunk_broker.ActionChunkBroker(
-                policy=_websocket_client_policy.WebsocketClientPolicy(
+                policy=create_resettable_websocket_policy(
                     host=args.host,
                     port=args.port,
                 ),

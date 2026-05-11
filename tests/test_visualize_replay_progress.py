@@ -396,6 +396,65 @@ def test_run_replay_visualization_uses_progress_tracker_and_falls_back_on_stall(
     assert len(frames) == 4
 
 
+def test_run_replay_visualization_resets_local_policy_history_before_infer():
+    from scripts.visualize_replay_progress import ReplayRunConfig, run_replay_visualization
+
+    events: list[str] = []
+
+    class FakeEnv:
+        front_camera_name = "cam_high"
+        camera_names = ("cam_high",)
+        num_steps = 1
+
+        def __init__(self) -> None:
+            self.cursor = 0
+
+        def set_cursor(self, idx: int) -> None:
+            self.cursor = idx
+
+        def get_cursor(self) -> int:
+            return self.cursor
+
+        def is_episode_complete(self) -> bool:
+            return self.cursor >= 1
+
+        def get_observation(self) -> dict[str, object]:
+            self.cursor += 1
+            return {"step": 0}
+
+    class FakePolicy:
+        def reset_history(self) -> None:
+            events.append("reset_history")
+
+        def infer(self, _obs: dict[str, object]) -> dict[str, object]:
+            import numpy as np
+
+            events.append("infer")
+            return {"progress": np.array([0.9], dtype=np.float32)}
+
+    config = ReplayRunConfig(
+        prompt="grab bread",
+        start_step=0,
+        end_step=1,
+        camera_name="cam_high",
+        complete_threshold=0.85,
+        stall_threshold=0.02,
+        stall_steps=3,
+        regression_threshold=0.1,
+    )
+
+    run_replay_visualization(
+        env=FakeEnv(),
+        policy=FakePolicy(),
+        planner=None,
+        config=config,
+        write_video_frame=None,
+        write_record=None,
+    )
+
+    assert events == ["reset_history", "infer"]
+
+
 def test_run_replay_visualization_can_confirm_completion_with_replanner():
     from scripts.visualize_replay_progress import ReplayRunConfig, run_replay_visualization
 

@@ -477,6 +477,17 @@ def open_video_writer(path: Path, *, width: int, height: int, fps: float) -> Vid
     return VideoSink(writer)
 
 
+def _reset_policy_history(policy: Any) -> None:
+    reset_history = getattr(policy, "reset_history", None)
+    if not callable(reset_history):
+        return
+
+    try:
+        reset_history()
+    except Exception as exc:  # noqa: BLE001
+        _log(f"warning: failed to reset local policy history: {exc}")
+
+
 def run_replay_visualization(
     *,
     env: Any,
@@ -495,6 +506,8 @@ def run_replay_visualization(
 
     if hasattr(env, "set_cursor"):
         env.set_cursor(config.start_step)
+
+    _reset_policy_history(policy)
 
     records: list[StepRecord] = []
     current_policy_prompt = config.prompt

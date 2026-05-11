@@ -3,6 +3,90 @@ import types
 from types import SimpleNamespace
 
 
+def test_policy_agent_reset_sends_remote_server_reset(monkeypatch):
+    from openpi_client import msgpack_numpy
+    from examples.piper_real import main as main_module
+
+    recorded: dict[str, object] = {}
+
+    class FakeConnection:
+        def __init__(self):
+            self.sent: list[bytes] = []
+
+        def send(self, payload):
+            self.sent.append(payload)
+
+        def recv(self):
+            return msgpack_numpy.packb({"ok": True})
+
+    class FakeWebsocketClientPolicy:
+        def __init__(self, host, port):
+            recorded["server"] = (host, port)
+            recorded["client"] = self
+            self._ws = FakeConnection()
+            self._packer = msgpack_numpy.Packer()
+
+        def get_server_metadata(self):
+            return {"reset_pose": [0.0] * 14}
+
+        def infer(self, _observation):
+            return {}
+
+        def reset(self):
+            recorded["client_reset_calls"] = recorded.get("client_reset_calls", 0) + 1
+
+    monkeypatch.setattr(
+        main_module._websocket_client_policy,
+        "WebsocketClientPolicy",
+        FakeWebsocketClientPolicy,
+    )
+
+    agent = main_module._create_policy_agent(main_module.Args(host="127.0.0.1", port=9001))
+    agent.reset()
+
+    client = recorded["client"]
+    assert recorded["server"] == ("127.0.0.1", 9001)
+    assert recorded["client_reset_calls"] == 1
+    assert [msgpack_numpy.unpackb(payload) for payload in client._ws.sent] == [
+        {"type": "reset"}
+    ]
+
+
+def test_policy_agent_reset_logs_remote_server_reset_failure(monkeypatch, caplog):
+    from openpi_client import msgpack_numpy
+    from examples.piper_real import main as main_module
+
+    class FailingConnection:
+        def send(self, _payload):
+            raise RuntimeError("reset send failed")
+
+    class FakeWebsocketClientPolicy:
+        def __init__(self, host, port):
+            self._ws = FailingConnection()
+            self._packer = msgpack_numpy.Packer()
+
+        def get_server_metadata(self):
+            return {"reset_pose": [0.0] * 14}
+
+        def infer(self, _observation):
+            return {}
+
+        def reset(self):
+            return
+
+    monkeypatch.setattr(
+        main_module._websocket_client_policy,
+        "WebsocketClientPolicy",
+        FakeWebsocketClientPolicy,
+    )
+
+    agent = main_module._create_policy_agent(main_module.Args())
+    with caplog.at_level("WARNING"):
+        agent.reset()
+
+    assert "Failed to send reset to remote policy server" in caplog.text
+
+
 def _install_live_main_fakes(monkeypatch, recorded, *, planner_run_routine_result=True):
     fake_env_module = types.ModuleType("examples.piper_real.env")
     fake_logger_module = types.ModuleType("examples.piper_real.logger")

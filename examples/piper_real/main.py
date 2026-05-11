@@ -29,6 +29,7 @@ from openpi_client import websocket_client_policy as _websocket_client_policy
 from openpi_client.runtime import subscriber as _subscriber
 from openpi_client.runtime.agents import policy_agent as _policy_agent
 from examples.piper_real.planner_config import PlannerConfig
+from rhos_cobot.openpi_remote_policy import create_resettable_websocket_policy
 
 
 DEFAULT_MAX_EPISODE_STEPS = 1000
@@ -154,6 +155,14 @@ class _ProgressLogSubscriber(_subscriber.Subscriber):
                 )
 
 
+def _create_remote_policy(args: Args):
+    return create_resettable_websocket_policy(
+        host=args.host,
+        port=args.port,
+        client_cls=_websocket_client_policy.WebsocketClientPolicy,
+    )
+
+
 def _build_progress_subscribers(args: Args) -> list[_subscriber.Subscriber]:
     logging.info("log_progress=%s", args.log_progress)
     subscribers: list[_subscriber.Subscriber] = []
@@ -175,10 +184,7 @@ def _build_progress_subscribers(args: Args) -> list[_subscriber.Subscriber]:
 
 
 def _create_policy_agent(args: Args) -> _policy_agent.PolicyAgent:
-    ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
-        host=args.host,
-        port=args.port,
-    )
+    ws_client_policy = _create_remote_policy(args)
     metadata = ws_client_policy.get_server_metadata()
     logging.info("Server metadata: %s", metadata)
     agent = _policy_agent.PolicyAgent(
@@ -1641,9 +1647,7 @@ def main(args: Args) -> None:
         if not _run_required_server_checks(args, needs_pi0=True):
             return
 
-        ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
-            host=args.host, port=args.port
-        )
+        ws_client_policy = _create_remote_policy(args)
         metadata = ws_client_policy.get_server_metadata()
         logging.info("Server metadata: %s", metadata)
 

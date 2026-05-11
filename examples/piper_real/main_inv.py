@@ -8,9 +8,9 @@ import tyro
 import rospy
 
 from openpi_client import action_chunk_broker
-from openpi_client import websocket_client_policy as _websocket_client_policy
 from openpi_client.runtime import runtime as _runtime
 from openpi_client.runtime.agents import policy_agent as _policy_agent
+from rhos_cobot.openpi_remote_policy import create_resettable_websocket_policy
 
 try:
     from examples.piper_real import env_inv as _env
@@ -34,7 +34,7 @@ class Args:
 
 
 def main(args: Args) -> None:
-    ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
+    ws_client_policy = create_resettable_websocket_policy(
         host=args.host,
         port=args.port,
     )
