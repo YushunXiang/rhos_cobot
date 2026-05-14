@@ -1,0 +1,45 @@
+<launch>
+    <!-- RGB-only wrapper for the three Astra/Dabai cameras used during data collection. -->
+    <arg name="camera_name" default="camera"/>
+    <arg name="3d_sensor" default="dabai"/>
+    <arg name="device_num" default="3"/>
+
+    <arg name="camera1_prefix" default="r"/>
+    <arg name="camera2_prefix" default="l"/>
+    <arg name="camera3_prefix" default="f"/>
+
+    <arg name="camera1_serila_number" default="CC15C430036"/>
+    <arg name="camera2_serila_number" default="CC15C43003B"/>
+    <arg name="camera3_serila_number" default="CC15C4300E5"/>
+
+    <arg name="enable_depth" default="false"/>
+    <arg name="enable_point_cloud" default="false"/>
+    <arg name="depth_align" default="false"/>
+
+    <include file="$(find astra_camera)/launch/$(arg 3d_sensor).launch">
+        <arg name="camera_name" value="$(arg camera_name)_$(arg camera1_prefix)"/>
+        <arg name="serial_number" value="$(arg camera1_serila_number)"/>
+        <arg name="device_num" value="$(arg device_num)"/>
+        <arg name="enable_depth" value="$(arg enable_depth)"/>
+        <arg name="enable_point_cloud" value="$(arg enable_point_cloud)"/>
+        <arg name="depth_align" value="$(arg depth_align)"/>
+    </include>
+
+    <include file="$(find astra_camera)/launch/$(arg 3d_sensor).launch">
+        <arg name="camera_name" value="$(arg camera_name)_$(arg camera2_prefix)"/>
+        <arg name="serial_number" value="$(arg camera2_serila_number)"/>
+        <arg name="device_num" value="$(arg device_num)"/>
+        <arg name="enable_depth" value="$(arg enable_depth)"/>
+        <arg name="enable_point_cloud" value="$(arg enable_point_cloud)"/>
+        <arg name="depth_align" value="$(arg depth_align)"/>
+    </include>
+
+    <include file="$(find astra_camera)/launch/$(arg 3d_sensor).launch">
+        <arg name="camera_name" value="$(arg camera_name)_$(arg camera3_prefix)"/>
+        <arg name="serial_number" value="$(arg camera3_serila_number)"/>
+        <arg name="device_num" value="$(arg device_num)"/>
+        <arg name="enable_depth" value="$(arg enable_depth)"/>
+        <arg name="enable_point_cloud" value="$(arg enable_point_cloud)"/>
+        <arg name="depth_align" value="$(arg depth_align)"/>
+    </include>
+</launch>

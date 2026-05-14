@@ -21,6 +21,9 @@ checkpoint = "checkpoints/your_policy_config/your_checkpoint"
 
 [pi0.local]
 session_name = "pi0-infer-local"
+# The recommended local layout is a sibling checkout:
+#   /home/agilex/rhos_cobot
+#   /home/agilex/openpi
 openpi_root = "../openpi"
 policy_config = "your_policy_config"
 checkpoint = "checkpoints/your_policy_config/your_checkpoint"

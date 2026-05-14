@@ -6,9 +6,10 @@
 
 # 定义您的sudo密码
 SUDO_PASSWORD="agx"
+REPO_DIR="/home/agilex/rhos_cobot"
 
 # 1. 新建终端，启动相机
-gnome-terminal --title="Astra Camera" -- bash -c "echo '启动Astra多相机...'; roslaunch astra_camera multi_camera.launch; exec bash"
+gnome-terminal --title="Astra Camera" -- bash -c "echo '启动Astra多相机 RGB-only...'; roslaunch ${REPO_DIR}/scripts/launch/multi_camera_rgb.launch; exec bash"
 
 # 等待一段时间，确保相机节点完全启动
 sleep 5

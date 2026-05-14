@@ -7,6 +7,17 @@ import sys
 from rhos_cobot.data_collection import RosOperator, save_data
 
 
+def _str_to_bool(value):
+    if isinstance(value, bool):
+        return value
+    normalized = value.lower()
+    if normalized in ("1", "true", "t", "yes", "y"):
+        return True
+    if normalized in ("0", "false", "f", "no", "n"):
+        return False
+    raise argparse.ArgumentTypeError(f"Expected a boolean value, got {value!r}")
+
+
 def get_dataset_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_dir', action='store', type=str, help='Dataset_dir.',
@@ -57,14 +68,18 @@ def get_dataset_arguments():
     parser.add_argument('--robot_base_topic', action='store', type=str, help='robot_base_topic',
                         default='/odom', required=False)
 
-    parser.add_argument('--use_robot_base', action='store', type=bool, help='use_robot_base',
+    parser.add_argument('--use_robot_base', nargs='?', const=True, type=_str_to_bool, help='use_robot_base',
                         default=False, required=False)
     # collect depth image
-    parser.add_argument('--use_depth_image', action='store_true', help='use_depth_image',
+    parser.add_argument('--use_depth_image', nargs='?', const=True, type=_str_to_bool, help='use_depth_image',
+                        default=False,
                         required=False)
 
     parser.add_argument('--frame_rate', action='store', type=int, help='frame_rate',
                         default=25, required=False)
+    parser.add_argument('--sync_debug_interval', action='store', type=float,
+                        help='Seconds between repeated sync-failure diagnostics. Set 0 to print only once per failure run.',
+                        default=2.0, required=False)
 
     args = parser.parse_args()
     return args

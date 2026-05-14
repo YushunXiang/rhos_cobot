@@ -207,43 +207,96 @@ class RosOperator:
         self.puppet_eef_left_deque = deque()
         self.puppet_eef_right_deque = deque()
 
-    def get_frame(self):
-        if len(self.img_left_deque) == 0 or len(self.img_right_deque) == 0 or len(self.img_front_deque) == 0 or \
-                (self.args.use_depth_image and (len(self.img_left_depth_deque) == 0 or len(self.img_right_depth_deque) == 0 or len(self.img_front_depth_deque) == 0)):
-            return False
-        if self.args.use_depth_image:
-            frame_time = min([self.img_left_deque[-1].header.stamp.to_sec(), self.img_right_deque[-1].header.stamp.to_sec(), self.img_front_deque[-1].header.stamp.to_sec(),
-                              self.img_left_depth_deque[-1].header.stamp.to_sec(), self.img_right_depth_deque[-1].header.stamp.to_sec(), self.img_front_depth_deque[-1].header.stamp.to_sec()])
-        else:
-            frame_time = min([self.img_left_deque[-1].header.stamp.to_sec(
-            ), self.img_right_deque[-1].header.stamp.to_sec(), self.img_front_deque[-1].header.stamp.to_sec()])
+    def _stamp_to_sec(self, msg):
+        stamp = getattr(getattr(msg, "header", None), "stamp", None)
+        if stamp is None:
+            return None
+        return stamp.to_sec()
 
-        if len(self.img_left_deque) == 0 or self.img_left_deque[-1].header.stamp.to_sec() < frame_time:
+    def _stamp_zero_header_on_receipt(self, msg):
+        stamp = self._stamp_to_sec(msg)
+        if stamp == 0.0:
+            msg.header.stamp = rospy.Time.now()
+        return msg
+
+    def _append_msg(self, target_deque, msg):
+        if len(target_deque) >= 2000:
+            target_deque.popleft()
+        target_deque.append(self._stamp_zero_header_on_receipt(msg))
+
+    def _image_sync_sources(self):
+        sources = [
+            ("img_left", self.img_left_deque),
+            ("img_right", self.img_right_deque),
+            ("img_front", self.img_front_deque),
+        ]
+        if self.args.use_depth_image:
+            sources.extend([
+                ("img_left_depth", self.img_left_depth_deque),
+                ("img_right_depth", self.img_right_depth_deque),
+                ("img_front_depth", self.img_front_depth_deque),
+            ])
+        return sources
+
+    def _sync_sources(self):
+        sources = self._image_sync_sources()
+        sources.extend([
+            ("master_arm_left", self.master_arm_left_deque),
+            ("master_arm_right", self.master_arm_right_deque),
+            ("puppet_arm_left", self.puppet_arm_left_deque),
+            ("puppet_arm_right", self.puppet_arm_right_deque),
+            ("puppet_eef_left", self.puppet_eef_left_deque),
+            ("puppet_eef_right", self.puppet_eef_right_deque),
+        ])
+        if self.args.use_robot_base:
+            sources.append(("robot_base", self.robot_base_deque))
+        return sources
+
+    def _latest_stamp(self, target_deque):
+        if len(target_deque) == 0:
+            return None
+        return self._stamp_to_sec(target_deque[-1])
+
+    def _sync_frame_time(self):
+        stamps = []
+        for _name, target_deque in self._image_sync_sources():
+            stamp = self._latest_stamp(target_deque)
+            if stamp is None:
+                return None
+            stamps.append(stamp)
+        return min(stamps)
+
+    def _sync_failure_reason(self):
+        frame_time = self._sync_frame_time()
+        if frame_time is None:
+            missing = [
+                f"{name}: empty"
+                for name, target_deque in self._image_sync_sources()
+                if len(target_deque) == 0
+            ]
+            return "waiting for image topics; " + "; ".join(missing)
+
+        issues = []
+        for name, target_deque in self._sync_sources():
+            stamp = self._latest_stamp(target_deque)
+            if stamp is None:
+                issues.append(f"{name}: empty")
+            elif stamp < frame_time:
+                issues.append(
+                    f"{name}: stale latest={stamp:.3f} < frame_time={frame_time:.3f}"
+                )
+        if not issues:
+            return f"frame_time={frame_time:.3f}; waiting for convertible frame data"
+        return f"frame_time={frame_time:.3f}; " + "; ".join(issues)
+
+    def get_frame(self):
+        frame_time = self._sync_frame_time()
+        if frame_time is None:
             return False
-        if len(self.img_right_deque) == 0 or self.img_right_deque[-1].header.stamp.to_sec() < frame_time:
-            return False
-        if len(self.img_front_deque) == 0 or self.img_front_deque[-1].header.stamp.to_sec() < frame_time:
-            return False
-        if len(self.master_arm_left_deque) == 0 or self.master_arm_left_deque[-1].header.stamp.to_sec() < frame_time:
-            return False
-        if len(self.master_arm_right_deque) == 0 or self.master_arm_right_deque[-1].header.stamp.to_sec() < frame_time:
-            return False
-        if len(self.puppet_arm_left_deque) == 0 or self.puppet_arm_left_deque[-1].header.stamp.to_sec() < frame_time:
-            return False
-        if len(self.puppet_arm_right_deque) == 0 or self.puppet_arm_right_deque[-1].header.stamp.to_sec() < frame_time:
-            return False
-        if len(self.puppet_eef_left_deque) == 0 or self.puppet_eef_left_deque[-1].header.stamp.to_sec() < frame_time:
-            return False
-        if len(self.puppet_eef_right_deque) == 0 or self.puppet_eef_right_deque[-1].header.stamp.to_sec() < frame_time:
-            return False
-        if self.args.use_depth_image and (len(self.img_left_depth_deque) == 0 or self.img_left_depth_deque[-1].header.stamp.to_sec() < frame_time):
-            return False
-        if self.args.use_depth_image and (len(self.img_right_depth_deque) == 0 or self.img_right_depth_deque[-1].header.stamp.to_sec() < frame_time):
-            return False
-        if self.args.use_depth_image and (len(self.img_front_depth_deque) == 0 or self.img_front_depth_deque[-1].header.stamp.to_sec() < frame_time):
-            return False
-        if self.args.use_robot_base and (len(self.robot_base_deque) == 0 or self.robot_base_deque[-1].header.stamp.to_sec() < frame_time):
-            return False
+        for _name, target_deque in self._sync_sources():
+            stamp = self._latest_stamp(target_deque)
+            if stamp is None or stamp < frame_time:
+                return False
 
         while self.img_left_deque[0].header.stamp.to_sec() < frame_time:
             self.img_left_deque.popleft()
@@ -301,9 +354,9 @@ class RosOperator:
                 self.img_right_depth_deque.popleft()
             img_right_depth = self.bridge.imgmsg_to_cv2(
                 self.img_right_depth_deque.popleft(), 'passthrough')
-        top, bottom, left, right = 40, 40, 0, 0
-        img_right_depth = cv2.copyMakeBorder(
-            img_right_depth, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
+            top, bottom, left, right = 40, 40, 0, 0
+            img_right_depth = cv2.copyMakeBorder(
+                img_right_depth, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
 
         img_front_depth = None
         if self.args.use_depth_image:
@@ -311,9 +364,9 @@ class RosOperator:
                 self.img_front_depth_deque.popleft()
             img_front_depth = self.bridge.imgmsg_to_cv2(
                 self.img_front_depth_deque.popleft(), 'passthrough')
-        top, bottom, left, right = 40, 40, 0, 0
-        img_front_depth = cv2.copyMakeBorder(
-            img_front_depth, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
+            top, bottom, left, right = 40, 40, 0, 0
+            img_front_depth = cv2.copyMakeBorder(
+                img_front_depth, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
 
         robot_base = None
         if self.args.use_robot_base:
@@ -324,69 +377,43 @@ class RosOperator:
                 puppet_arm_left, puppet_arm_right, master_arm_left, master_arm_right, robot_base, puppet_eef_left, puppet_eef_right)
 
     def img_left_callback(self, msg):
-        if len(self.img_left_deque) >= 2000:
-            self.img_left_deque.popleft()
-        self.img_left_deque.append(msg)
+        self._append_msg(self.img_left_deque, msg)
 
     def img_right_callback(self, msg):
-        if len(self.img_right_deque) >= 2000:
-            self.img_right_deque.popleft()
-        self.img_right_deque.append(msg)
+        self._append_msg(self.img_right_deque, msg)
 
     def img_front_callback(self, msg):
-        if len(self.img_front_deque) >= 2000:
-            self.img_front_deque.popleft()
-        self.img_front_deque.append(msg)
+        self._append_msg(self.img_front_deque, msg)
 
     def img_left_depth_callback(self, msg):
-        if len(self.img_left_depth_deque) >= 2000:
-            self.img_left_depth_deque.popleft()
-        self.img_left_depth_deque.append(msg)
+        self._append_msg(self.img_left_depth_deque, msg)
 
     def img_right_depth_callback(self, msg):
-        if len(self.img_right_depth_deque) >= 2000:
-            self.img_right_depth_deque.popleft()
-        self.img_right_depth_deque.append(msg)
+        self._append_msg(self.img_right_depth_deque, msg)
 
     def img_front_depth_callback(self, msg):
-        if len(self.img_front_depth_deque) >= 2000:
-            self.img_front_depth_deque.popleft()
-        self.img_front_depth_deque.append(msg)
+        self._append_msg(self.img_front_depth_deque, msg)
 
     def master_arm_left_callback(self, msg):
-        if len(self.master_arm_left_deque) >= 2000:
-            self.master_arm_left_deque.popleft()
-        self.master_arm_left_deque.append(msg)
+        self._append_msg(self.master_arm_left_deque, msg)
 
     def master_arm_right_callback(self, msg):
-        if len(self.master_arm_right_deque) >= 2000:
-            self.master_arm_right_deque.popleft()
-        self.master_arm_right_deque.append(msg)
+        self._append_msg(self.master_arm_right_deque, msg)
 
     def puppet_arm_left_callback(self, msg):
-        if len(self.puppet_arm_left_deque) >= 2000:
-            self.puppet_arm_left_deque.popleft()
-        self.puppet_arm_left_deque.append(msg)
+        self._append_msg(self.puppet_arm_left_deque, msg)
 
     def puppet_arm_right_callback(self, msg):
-        if len(self.puppet_arm_right_deque) >= 2000:
-            self.puppet_arm_right_deque.popleft()
-        self.puppet_arm_right_deque.append(msg)
+        self._append_msg(self.puppet_arm_right_deque, msg)
 
     def puppet_eef_left_callback(self, msg):
-        if len(self.puppet_eef_left_deque) >= 2000:
-            self.puppet_eef_left_deque.popleft()
-        self.puppet_eef_left_deque.append(msg)
+        self._append_msg(self.puppet_eef_left_deque, msg)
 
     def puppet_eef_right_callback(self, msg):
-        if len(self.puppet_eef_right_deque) >= 2000:
-            self.puppet_eef_right_deque.popleft()
-        self.puppet_eef_right_deque.append(msg)
+        self._append_msg(self.puppet_eef_right_deque, msg)
 
     def robot_base_callback(self, msg):
-        if len(self.robot_base_deque) >= 2000:
-            self.robot_base_deque.popleft()
-        self.robot_base_deque.append(msg)
+        self._append_msg(self.robot_base_deque, msg)
 
     def init_ros(self):
         rospy.init_node('record_episodes', anonymous=True)
@@ -440,6 +467,7 @@ class RosOperator:
 
         rate = rospy.Rate(self.args.frame_rate)
         print_flag = True
+        last_sync_debug_time = 0.0
         stage = 0
         with NonBlockInput() as input:
             while not rospy.is_shutdown():
@@ -476,9 +504,15 @@ class RosOperator:
                             f"\033[33m\n[INFO] Unknown: {key} \033[0m\n")            # 2 收集数据
                 result = self.get_frame()
                 if not result:
-                    if print_flag:
-                        print("syn fail")
+                    now = time.time()
+                    debug_interval = getattr(self.args, "sync_debug_interval", 2.0)
+                    should_print = print_flag or (
+                        debug_interval > 0.0 and now - last_sync_debug_time >= debug_interval
+                    )
+                    if should_print:
+                        print(f"syn fail: {self._sync_failure_reason()}")
                         print_flag = False
+                        last_sync_debug_time = now
                     rate.sleep()
                     continue
                 print_flag = True

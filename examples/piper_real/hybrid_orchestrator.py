@@ -184,7 +184,9 @@ class ReplayHybridBackend(HybridBackendBase):
 
     def prepare_subtask(self, subtask: Any, index: int, total: int) -> None:
         if self.visualizer is not None:
-            self.visualizer.set_subtask_context(index, total, subtask.type, subtask.prompt)
+            self.visualizer.set_subtask_context(
+                index, total, subtask.type, subtask.prompt
+            )
 
     def execute_navigate(
         self,
@@ -234,6 +236,7 @@ class ReplayHybridBackend(HybridBackendBase):
 
 @dataclasses.dataclass
 class RealHybridBackend(HybridBackendBase):
+    visualizer: Any | None = None
     navigate_func: Callable[..., Any] | None = None
     use_robot_base: bool = False
     frame_tick_callback: Callable[[], None] | None = None
@@ -250,7 +253,28 @@ class RealHybridBackend(HybridBackendBase):
         self.navigation_only_limit_navigate_once = True
         self.abort_on_episode_complete_with_remaining = False
         self.allow_final_replay_exhaustion = False
-        self.manipulation_visualizer = None
+        self.manipulation_visualizer = self.visualizer
+
+    def prepare_subtask(self, subtask: Any, index: int, total: int) -> None:
+        if self.visualizer is not None:
+            self.visualizer.set_subtask_context(
+                index, total, subtask.type, subtask.prompt
+            )
+
+    def _on_navigation_frame(self, index: int, total: int) -> None:
+        if self.frame_tick_callback is not None:
+            self.frame_tick_callback()
+        if self.visualizer is None:
+            return
+        if not self.visualizer.update(
+            _visualizer_step(self.environment),
+            extra_info=f"navigate subtask {index}/{total}",
+        ):
+            logging.info(
+                "Real hybrid visualizer requested stop during navigate subtask %d/%d.",
+                index,
+                total,
+            )
 
     def execute_navigate(
         self,
@@ -266,11 +290,15 @@ class RealHybridBackend(HybridBackendBase):
                 completed=False,
             )
         ros_operator = None if self.environment is None else self.environment.ros_operator
+        frame_tick_callback = None
+        if self.frame_tick_callback is not None or self.visualizer is not None:
+            frame_tick_callback = lambda: self._on_navigation_frame(index, total)
+
         result = self.navigate_func(
             subtask.prompt,
             ros_operator,
             dry_run=not self.use_robot_base,
-            frame_tick_callback=self.frame_tick_callback,
+            frame_tick_callback=frame_tick_callback,
         )
         if not result.ok:
             logging.error(
@@ -311,6 +339,8 @@ class RealHybridBackend(HybridBackendBase):
             close = getattr(self.environment, "close", None)
             if callable(close):
                 close()
+        if self.visualizer is not None:
+            self.visualizer.close()
         if save_dir_for_stitch is not None and self.stitch_camera_videos is not None:
             try:
                 logging.info("Stitching camera videos in %s ...", save_dir_for_stitch)

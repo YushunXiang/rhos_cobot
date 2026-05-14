@@ -26,17 +26,28 @@ Shared constraints:
 
 ## Python Environment
 
+This example expects OpenPI to live next to `rhos_cobot`, not inside
+`~/cobot_magic`:
+
+```bash
+cd /home/agilex
+git clone yushun_github:YushunXiang/OCL-openpi.git openpi
+```
+
+The `openpi-client` dependency is resolved as an editable local package from
+`../../../openpi/packages/openpi-client`, relative to `examples/piper_real`.
+
 ```bash
 # Source your ROS environment first.
 source /opt/ros/<distro>/setup.bash
 
-# Create a separate uv-managed environment for this example.
+# Create or refresh the default uv-managed environment for this example.
 cd examples/piper_real
 uv python install 3.10.18
-UV_PROJECT_ENVIRONMENT=.venv-uv uv sync --python 3.10.18
+UV_PROJECT_ENVIRONMENT=.venv uv sync --python 3.10.18
 
 # Run the robot.
-UV_PROJECT_ENVIRONMENT=.venv-uv uv run python main.py
+UV_PROJECT_ENVIRONMENT=.venv uv run python main.py
 ```
 
 If you prefer to stay in the repo root, the equivalent command is:
@@ -44,11 +55,11 @@ If you prefer to stay in the repo root, the equivalent command is:
 ```bash
 source /opt/ros/<distro>/setup.bash
 uv python install 3.10.18
-UV_PROJECT_ENVIRONMENT=examples/piper_real/.venv-uv uv sync --project examples/piper_real --python 3.10.18
-UV_PROJECT_ENVIRONMENT=examples/piper_real/.venv-uv uv run --project examples/piper_real python examples/piper_real/main.py
+UV_PROJECT_ENVIRONMENT=.venv uv sync --project examples/piper_real --python 3.10.18
+UV_PROJECT_ENVIRONMENT=.venv uv run --project examples/piper_real python examples/piper_real/main.py
 ```
 
-`pyproject.toml` is now the source of truth for Python dependencies in this example. The legacy `requirements.in` and `requirements.txt` files are kept only for reference. See [`UV_MIGRATION.md`](./UV_MIGRATION.md) for the cross-machine migration workflow.
+`pyproject.toml` is now the source of truth for Python dependencies in this example. The deploy helper defaults to the uv-managed `examples/piper_real/.venv/bin/python`. The legacy `requirements.in` and `requirements.txt` files are kept only for reference. See [`UV_MIGRATION.md`](./UV_MIGRATION.md) for the cross-machine migration workflow.
 
 ## Robot Workstation Setup
 
@@ -57,7 +68,7 @@ sh scripts/init.sh
 conda activate aloha
 init_deploy
 roslaunch piper start_ms_piper.launch mode:=1 auto_enable:=true
-UV_PROJECT_ENVIRONMENT=examples/piper_real/.venv-uv uv run --project examples/piper_real python examples/piper_real/main.py
+UV_PROJECT_ENVIRONMENT=.venv uv run --project examples/piper_real python examples/piper_real/main.py
 ```
 
 Before running this example, bring up the TRACER base bridge that publishes `/odom_raw`, consumes `/cmd_vel`, and keeps the lower-level CAN control alive within the platform's 500ms command timeout. If you use the official AgileX stack, the CAN side should match the manual's `gs_usb` + `can0` 500k setup and command-mode requirements.

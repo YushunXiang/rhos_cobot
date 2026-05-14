@@ -29,8 +29,8 @@
 #   QZ_HEALTH_TIMEOUT_SEC              qz health check timeout seconds (default 5).
 #   QZ_PROXY_URL       qz HTTP proxy URL (default http://127.0.0.1:8888).
 #   QZ_USE_PROXY       0/1 export qz proxy env for planner requests (default 1).
-#   PYTHON_CMD         Python interpreter. Default examples/piper_real/.venv/bin/python,
-#                      fallback python3.
+#   PYTHON_CMD         Python interpreter. Default uv-managed
+#                      examples/piper_real/.venv/bin/python, fallback python3.
 #   NAVIGATION_ONLY    Pass --navigation-only in planner mode (default 1).
 #   MANIPULATE_MAX_STEPS               Hybrid: per-subtask policy step cap (default 10000).
 #   MANIPULATE_REPLAN_INTERVAL_STEPS   Hybrid: VLM replan every N policy steps (default 100).

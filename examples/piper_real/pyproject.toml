@@ -33,4 +33,9 @@ dependencies = [
 package = false
 
 [tool.uv.sources]
-openpi-client = { git = "ssh://git@gitee.com/yuz1wan/cobot_magic.git", rev = "38460abc713af469c33664921f13e1800c99a413", subdirectory = "openpi/packages/openpi-client" }
+openpi-client = { path = "../../../openpi/packages/openpi-client", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest==8.3.5",
+]
